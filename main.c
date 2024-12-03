@@ -10,6 +10,7 @@
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
+#define MAX_GRID_SIZE 65535
 
 static struct termios old_termios, new_termios;
 
@@ -18,16 +19,25 @@ typedef struct {
 	int y;
 } Pos;
 
+typedef enum {
+	CLEAR,
+	CURSOR,
+	BLUE,
+	WHITE,
+} Color;
+
 typedef struct {
 	char symbol;
+	Color color;
 } Cell;
 
-typedef Cell Grid[65535];
+typedef Cell Grid[MAX_GRID_SIZE];
 
 bool exit_loop = false;
 
 Grid rendered_grid = {};
 Grid current_grid = {};
+Grid source_file_grid = {};
 
 int get_grid_index(int x, int y, int cols) {
 	return (y * cols) + x;
@@ -66,6 +76,26 @@ void r_clear_screen() {
 	fprintf(stdout, "\e[1;1H\e[2J");
 }
 
+void r_set_color(Color color) {
+	switch (color) {
+		case CURSOR:
+			fprintf(stdout, "\033[30;47m");
+			break;
+
+		case BLUE:
+			fprintf(stdout, "\033[34m");
+			break;
+
+		case WHITE:
+			fprintf(stdout, "\033[0m");
+			break;
+
+		case CLEAR:
+			fprintf(stdout, "\033[0m");
+			break;
+	}
+}
+
 int b_read_input(void *buf) {
 	return read(STDIN_FILENO, buf, sizeof(buf));
 }
@@ -78,10 +108,12 @@ void render(int rows, int cols) {
 			Cell old_cell = rendered_grid[index];
 			Cell new_cell = current_grid[index];
 
-			if (old_cell.symbol != new_cell.symbol) {
+			if (old_cell.symbol != new_cell.symbol || old_cell.color != new_cell.color) {
 				r_move_cursor(x, y);
 
+				r_set_color(new_cell.color);
 				printf("%c", new_cell.symbol);
+				r_set_color(CLEAR);
 			}
 		}
 	}
@@ -97,31 +129,56 @@ void switch_grids() {
 	);
 }
 
-void fill_grid_with_source_file(int rows, int cols, char *file_name) {
+void fill_source_file_grid(int rows, int cols, char *file_name) {
 	int y = 0;
 	char line[cols];
 	FILE *source_file = fopen(file_name, "r");
 
-	while (y < rows && fgets(line, cols, source_file)) {
+	while (fgets(line, cols, source_file)) {
 		bool line_ended = false;
+		bool buf_size_exceeded = false;
 
 		for (int i = 0; i < cols; i++) {
+			if ((y * cols) + i >= MAX_GRID_SIZE) {
+				buf_size_exceeded = true;
+				break;
+			}
+
 			if (line[i] == '\n')
 				line_ended = true;
 
 			if (line_ended) {
-				Cell cell = {.symbol = ' '};
-				current_grid[(y * cols) + i] = cell;
+				Cell cell = {.symbol = ' ', .color = CLEAR};
+				source_file_grid[(y * cols) + i] = cell;
 
 				continue;
 			}
 
-			Cell cell = {.symbol = line[i]};
-			current_grid[(y * cols) + i] = cell;
+			Cell cell = {.symbol = line[i], .color = CLEAR};
+			source_file_grid[(y * cols) + i] = cell;
 		}
+
+		if (buf_size_exceeded)
+			break;
 
 		y++;
 	}
+}
+
+void draw_source_file(int rows, int cols, int y_offset) {
+	for (int y = 0; y < rows; y++) {
+		for (int x = 0; x < cols; x++) {
+			int source_index = get_grid_index(x, y + y_offset, cols);
+			int grid_index = get_grid_index(x, y, cols);
+
+			memcpy(&current_grid[grid_index], &source_file_grid[source_index], sizeof(Cell));
+		}
+	}
+}
+
+void draw_cursor(int x, int y, int cols) {
+	// current_grid[get_grid_index(x, y, cols)].symbol = '@';
+	current_grid[get_grid_index(x, y, cols)].color = CURSOR;
 }
 
 int main(int argc, char * argv[]) {
@@ -138,26 +195,52 @@ int main(int argc, char * argv[]) {
 
 	int rows = w_winsize.ws_row;
 	int cols = w_winsize.ws_col;
+	int y_offset = 0;
 	Pos cursor_pos = { .x = 0, .y = 0 };
 	char buf[128];
 
 	if (argc > 1) {
-		fill_grid_with_source_file(rows, cols, argv[1]);
+		fill_source_file_grid(rows, cols, argv[1]);
 	}
 
+	draw_source_file(rows, cols, y_offset);
 	render(rows, cols);
 	switch_grids();
 
 	while (!exit_loop) {
 		int k = b_read_input(&buf);
 
-		/* for (int i = 0; i < k; i++) { */
-		/* 	fprintf(stdout, "%c", buf[i]); */
-		/* } */
+		for (int i = 0; i < k; i++) {
+			switch (buf[i]) {
+				case 'j':
+					cursor_pos.y = MIN(rows, cursor_pos.y + 1);
+					break;
+
+				case 'k':
+					cursor_pos.y = MAX(0, cursor_pos.y - 1);
+					break;
+
+				case 'l':
+					cursor_pos.x = MIN(cols, cursor_pos.x + 1);
+					break;
+
+				case 'h':
+					cursor_pos.x = MAX(0, cursor_pos.x - 1);
+					break;
+
+				default:
+					break;
+			}
+		}
+
+		draw_source_file(rows, cols, y_offset);
+		draw_cursor(cursor_pos.x, cursor_pos.y, cols);
 
 		render(rows, cols);
 		switch_grids();
 
 		fflush(stdout);
 	}
+
+	r_move_cursor(0, rows);
 }
