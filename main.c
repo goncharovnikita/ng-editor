@@ -137,25 +137,46 @@ void fill_source_file_grid(int rows, int cols, char *file_name) {
 	while (fgets(line, cols, source_file)) {
 		bool line_ended = false;
 		bool buf_size_exceeded = false;
+		int source_file_index = 0;
+		int grid_index = 0;
 
-		for (int i = 0; i < cols; i++) {
-			if ((y * cols) + i >= MAX_GRID_SIZE) {
+		while (grid_index < cols) {
+			if ((y * cols) + grid_index >= MAX_GRID_SIZE) {
 				buf_size_exceeded = true;
 				break;
 			}
 
-			if (line[i] == '\n')
+			if (line[source_file_index] == '\n')
 				line_ended = true;
 
 			if (line_ended) {
 				Cell cell = {.symbol = ' ', .color = CLEAR};
-				source_file_grid[(y * cols) + i] = cell;
+				source_file_grid[(y * cols) + grid_index] = cell;
+				source_file_index++;
+				grid_index++;
 
 				continue;
 			}
 
-			Cell cell = {.symbol = line[i], .color = CLEAR};
-			source_file_grid[(y * cols) + i] = cell;
+			if (line[source_file_index] == '\t') {
+				int j = 0;
+
+				while (grid_index < cols && j < 4) {
+					Cell cell = {.symbol = ' ', .color = CLEAR};
+					source_file_grid[(y * cols) + grid_index] = cell;
+					grid_index++;
+					j++;
+				}
+
+				source_file_index++;
+
+				continue;
+			}
+
+			Cell cell = {.symbol = line[source_file_index], .color = CLEAR};
+			source_file_grid[(y * cols) + grid_index] = cell;
+			source_file_index++;
+			grid_index++;
 		}
 
 		if (buf_size_exceeded)
@@ -163,6 +184,8 @@ void fill_source_file_grid(int rows, int cols, char *file_name) {
 
 		y++;
 	}
+
+	fclose(source_file);
 }
 
 void draw_source_file(int rows, int cols, int y_offset) {
@@ -196,24 +219,28 @@ int main(int argc, char * argv[]) {
 	int rows = w_winsize.ws_row;
 	int cols = w_winsize.ws_col;
 	int y_offset = 0;
+	int window_rows = rows - 2;
 	Pos cursor_pos = { .x = 0, .y = 0 };
-	char buf[128];
+	char input_buf[128];
 
 	if (argc > 1) {
-		fill_source_file_grid(rows, cols, argv[1]);
+		fill_source_file_grid(window_rows, cols, argv[1]);
 	}
 
-	draw_source_file(rows, cols, y_offset);
+	draw_source_file(window_rows, cols, y_offset);
 	render(rows, cols);
 	switch_grids();
 
 	while (!exit_loop) {
-		int k = b_read_input(&buf);
+		int k = b_read_input(&input_buf);
 
 		for (int i = 0; i < k; i++) {
-			switch (buf[i]) {
+			switch (input_buf[i]) {
 				case 'j':
-					cursor_pos.y = MIN(rows, cursor_pos.y + 1);
+					if (cursor_pos.y == window_rows - 1)
+						y_offset++;
+
+					cursor_pos.y = MIN(window_rows - 1, cursor_pos.y + 1);
 					break;
 
 				case 'k':
@@ -228,12 +255,24 @@ int main(int argc, char * argv[]) {
 					cursor_pos.x = MAX(0, cursor_pos.x - 1);
 					break;
 
+				case 'M':
+					cursor_pos.y = window_rows / 2;
+					break;
+
+				case 'H':
+					cursor_pos.y = 0;
+					break;
+
+				case 'L':
+					cursor_pos.y = window_rows - 1;
+					break;
+
 				default:
 					break;
 			}
 		}
 
-		draw_source_file(rows, cols, y_offset);
+		draw_source_file(window_rows, cols, y_offset);
 		draw_cursor(cursor_pos.x, cursor_pos.y, cols);
 
 		render(rows, cols);
