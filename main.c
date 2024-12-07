@@ -6,6 +6,7 @@
 #include <signal.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <sys/ioctl.h>
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
@@ -22,6 +23,7 @@ typedef struct {
 typedef enum {
 	CLEAR,
 	CURSOR,
+	INFO_LINE,
 	BLUE,
 	WHITE,
 } Color;
@@ -32,6 +34,12 @@ typedef struct {
 } Cell;
 
 typedef Cell Grid[MAX_GRID_SIZE];
+
+typedef struct {
+	char *filename;
+	int32_t line;
+	int32_t column;
+} BufferStatus;
 
 bool exit_loop = false;
 
@@ -79,6 +87,10 @@ void r_clear_screen() {
 void r_set_color(Color color) {
 	switch (color) {
 		case CURSOR:
+			fprintf(stdout, "\033[30;47m");
+			break;
+
+		case INFO_LINE:
 			fprintf(stdout, "\033[30;47m");
 			break;
 
@@ -200,8 +212,28 @@ void draw_source_file(int rows, int cols, int y_offset) {
 }
 
 void draw_cursor(int x, int y, int cols) {
-	// current_grid[get_grid_index(x, y, cols)].symbol = '@';
 	current_grid[get_grid_index(x, y, cols)].color = CURSOR;
+}
+
+void draw_info_line(int y, int cols, BufferStatus status) {
+	for (int i = 0; i < cols; i++) {
+		current_grid[get_grid_index(i, y, cols)].symbol = ' ';
+		current_grid[get_grid_index(i, y, cols)].color = INFO_LINE;
+	}
+
+	for (int i = 0; i < strlen(status.filename); i++) {
+		current_grid[get_grid_index(i, y, cols)].symbol = status.filename[i];
+	}
+
+	char line_and_column_text[256];
+
+	sprintf(line_and_column_text, "%d,%d", status.line, status.column);
+
+	int line_and_column_text_len = strlen(line_and_column_text);
+
+	for (int i = 0; i < strlen(line_and_column_text); i++) {
+		current_grid[get_grid_index(cols - i - 1, y, cols)].symbol = line_and_column_text[line_and_column_text_len - 1 - i];
+	}
 }
 
 int main(int argc, char * argv[]) {
@@ -223,11 +255,19 @@ int main(int argc, char * argv[]) {
 	Pos cursor_pos = { .x = 0, .y = 0 };
 	char input_buf[128];
 
+	BufferStatus buffer_status = {};
+	buffer_status.filename = "empty buffer";
+	buffer_status.line = 0;
+	buffer_status.column = 0;
+
 	if (argc > 1) {
 		fill_source_file_grid(window_rows, cols, argv[1]);
+		buffer_status.filename = argv[1];
 	}
 
 	draw_source_file(window_rows, cols, y_offset);
+	draw_cursor(cursor_pos.x, cursor_pos.y, cols);
+	draw_info_line(rows - 2, cols, buffer_status);
 	render(rows, cols);
 	switch_grids();
 
@@ -272,8 +312,12 @@ int main(int argc, char * argv[]) {
 			}
 		}
 
+		buffer_status.column = cursor_pos.x;
+		buffer_status.line = cursor_pos.y;
+
 		draw_source_file(window_rows, cols, y_offset);
 		draw_cursor(cursor_pos.x, cursor_pos.y, cols);
+		draw_info_line(rows - 2, cols, buffer_status);
 
 		render(rows, cols);
 		switch_grids();
