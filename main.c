@@ -21,6 +21,11 @@ typedef struct {
 	int y;
 } Pos;
 
+typedef struct {
+	Pos origin;
+	Pos end;
+} View;
+
 typedef enum {
 	CLEAR,
 	CURSOR,
@@ -173,7 +178,7 @@ void switch_grids() {
 	);
 }
 
-void fill_source_file_grid(int rows, int cols, char *file_name) {
+void fill_source_file_grid(int cols, char *file_name) {
 	int y = 0;
 	char line[cols];
 	FILE *source_file = fopen(file_name, "r");
@@ -232,19 +237,22 @@ void fill_source_file_grid(int rows, int cols, char *file_name) {
 	fclose(source_file);
 }
 
-void draw_source_file(int rows, int cols, int y_offset) {
+void draw_source_file(View dest, int x_offset, int y_offset) {
+	int cols = dest.end.x - dest.origin.x;
+	int rows = dest.end.y - dest.origin.y;
+
 	for (int y = 0; y < rows; y++) {
 		for (int x = 0; x < cols; x++) {
-			int source_index = get_grid_index(x, y + y_offset, cols);
-			int grid_index = get_grid_index(x, y, cols);
+			int source_index = get_grid_index(x + x_offset, y + y_offset, cols);
+			int grid_index = get_grid_index(x + (dest.origin.x * (y + 1)), y + dest.origin.y, cols);
 
 			memcpy(&current_grid[grid_index], &source_file_grid[source_index], sizeof(Cell));
 		}
 	}
 }
 
-void draw_cursor(int x, int y, int cols) {
-	current_grid[get_grid_index(x, y, cols)].color = CURSOR;
+void draw_cursor(View dest, int x, int y, int cols) {
+	current_grid[get_grid_index(x + (dest.origin.x), y + dest.origin.y, cols)].color = CURSOR;
 }
 
 void draw_info_line(int y, int cols, BufferStatus status) {
@@ -439,8 +447,8 @@ int main(int argc, char * argv[]) {
 
 	int rows = w_winsize.ws_row;
 	int cols = w_winsize.ws_col;
+	int x_offset = 0;
 	int y_offset = 0;
-	int window_rows = rows - 2;
 	Pos cursor_pos = { .x = 0, .y = 0 };
 
 	int user_command_read_index = 0;
@@ -456,13 +464,22 @@ int main(int argc, char * argv[]) {
 	buffer_status.line = 0;
 	buffer_status.column = 0;
 
+	View initial_buffer_view;
+	initial_buffer_view.origin.x = 3;
+	initial_buffer_view.origin.y = 0;
+	initial_buffer_view.end.x = cols;
+	initial_buffer_view.end.y = rows - 2;
+
 	if (argc > 1) {
-		fill_source_file_grid(window_rows, cols, argv[1]);
+		fill_source_file_grid(
+			initial_buffer_view.end.x - initial_buffer_view.origin.x,
+			argv[1]
+		);
 		buffer_status.filename = argv[1];
 	}
 
-	draw_source_file(window_rows, cols, y_offset);
-	draw_cursor(cursor_pos.x, cursor_pos.y, cols);
+	draw_source_file(initial_buffer_view, y_offset, x_offset);
+	draw_cursor(initial_buffer_view, cursor_pos.x, cursor_pos.y, cols);
 	draw_info_line(rows - 2, cols, buffer_status);
 	render(rows, cols);
 	switch_grids();
@@ -475,17 +492,23 @@ int main(int argc, char * argv[]) {
 			&editor_command_read_index,
 			&editor_command_write_index,
 			cursor_pos,
-			window_rows,
-			cols
+			initial_buffer_view.end.y - initial_buffer_view.origin.y,
+			initial_buffer_view.end.x - initial_buffer_view.origin.x
 		);
 
-		process_editor_commands(&editor_command_read_index, &editor_command_write_index, &cursor_pos, window_rows, cols);
+		process_editor_commands(
+			&editor_command_read_index,
+			&editor_command_write_index,
+			&cursor_pos,
+			initial_buffer_view.end.y - initial_buffer_view.origin.y,
+			initial_buffer_view.end.x - initial_buffer_view.origin.x
+		);
 
 		buffer_status.column = cursor_pos.x;
 		buffer_status.line = cursor_pos.y;
 
-		draw_source_file(window_rows, cols, y_offset);
-		draw_cursor(cursor_pos.x, cursor_pos.y, cols);
+		draw_source_file(initial_buffer_view, x_offset, y_offset);
+		draw_cursor(initial_buffer_view, cursor_pos.x, cursor_pos.y, cols);
 		draw_info_line(rows - 2, cols, buffer_status);
 
 		render(rows, cols);
