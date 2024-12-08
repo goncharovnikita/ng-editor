@@ -12,6 +12,7 @@
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
 #define MAX_GRID_SIZE 65535
+#define MAX_COMMANDS_BUFFER_SIZE 1
 
 static struct termios old_termios, new_termios;
 
@@ -28,6 +29,20 @@ typedef enum {
 	WHITE,
 } Color;
 
+typedef enum {
+	EC_MOVE_CURSOR,
+} EditorCommandType;
+
+typedef enum {
+	UC_h,
+	UC_j,
+	UC_k,
+	UC_l,
+	UC_H,
+	UC_M,
+	UC_L,
+} UserCommandType;
+
 typedef struct {
 	char symbol;
 	Color color;
@@ -41,11 +56,28 @@ typedef struct {
 	int32_t column;
 } BufferStatus;
 
+typedef struct {
+	UserCommandType type;
+} UserCommand;
+
+typedef struct {
+	int x;
+	int y;
+} EditorCommandMoveData;
+
+typedef struct {
+	EditorCommandType type;
+	char data[256];
+} EditorCommand;
+
 bool exit_loop = false;
 
 Grid rendered_grid = {};
 Grid current_grid = {};
 Grid source_file_grid = {};
+
+UserCommand user_commands[MAX_COMMANDS_BUFFER_SIZE] = {};
+EditorCommand editor_commands[MAX_COMMANDS_BUFFER_SIZE] = {};
 
 int get_grid_index(int x, int y, int cols) {
 	return (y * cols) + x;
@@ -236,6 +268,163 @@ void draw_info_line(int y, int cols, BufferStatus status) {
 	}
 }
 
+void add_user_command(int *read_index, int *write_index, UserCommandType type) {
+	if (*write_index >= MAX_COMMANDS_BUFFER_SIZE) {
+		*write_index = 0;
+		*read_index = 0;
+	}
+
+	user_commands[*write_index].type = type;
+
+	*write_index = *write_index + 1;
+}
+
+void handle_user_input(char *input_buf, int *buffer_read_index, int *buffer_write_index) {
+	int k = b_read_input(input_buf);
+
+	for (int i = 0; i < k; i++) {
+		switch (input_buf[i]) {
+			case 'j':
+				add_user_command(buffer_read_index, buffer_write_index, UC_j);
+				break;
+
+			case 'k':
+				add_user_command(buffer_read_index, buffer_write_index, UC_k);
+				break;
+
+			case 'l':
+				add_user_command(buffer_read_index, buffer_write_index, UC_l);
+				break;
+
+			case 'h':
+				add_user_command(buffer_read_index, buffer_write_index, UC_h);
+				break;
+
+			case 'M':
+				add_user_command(buffer_read_index, buffer_write_index, UC_M);
+				break;
+
+			case 'H':
+				add_user_command(buffer_read_index, buffer_write_index, UC_H);
+				break;
+
+			case 'L':
+				add_user_command(buffer_read_index, buffer_write_index, UC_L);
+				break;
+
+			default:
+				break;
+		}
+	}
+}
+
+void add_editor_command(int *read_index, int *write_index, void *data, int size_of_data) {
+	if (*write_index >= MAX_COMMANDS_BUFFER_SIZE) {
+		*write_index = 0;
+		*read_index = 0;
+	}
+
+	memcpy(&editor_commands[*write_index].data, data, size_of_data);
+	editor_commands[*write_index].type = EC_MOVE_CURSOR;
+
+	*write_index = *write_index + 1;
+}
+
+void process_user_commands(
+	int *user_read_index,
+	int *user_write_index,
+	int *editor_read_index,
+	int *editor_write_index,
+	Pos cursor_pos,
+	int rows,
+	int cols
+) {
+	while (*user_read_index != *user_write_index) {
+		switch (user_commands[*user_read_index].type) {
+			case UC_h: {
+				EditorCommandMoveData data = {.x = MAX(0, cursor_pos.x - 1), .y = cursor_pos.y};
+
+				add_editor_command(editor_read_index, editor_write_index, &data, sizeof(data));
+				break;
+			}
+
+			case UC_j: {
+				EditorCommandMoveData data = {.x = cursor_pos.x, .y = MIN(rows - 1, cursor_pos.y + 1)};
+
+				add_editor_command(editor_read_index, editor_write_index, &data, sizeof(data));
+				break;
+			}
+
+			case UC_k: {
+				EditorCommandMoveData data = {.x = cursor_pos.x, .y = MAX(0, cursor_pos.y - 1)};
+
+				add_editor_command(editor_read_index, editor_write_index, &data, sizeof(data));
+				break;
+			}
+
+			case UC_l: {
+				EditorCommandMoveData data = {.x = MIN(cols, cursor_pos.x + 1), .y = cursor_pos.y};
+
+				add_editor_command(editor_read_index, editor_write_index, &data, sizeof(data));
+				break;
+			}
+
+			case UC_H: {
+				EditorCommandMoveData data = {.x = cursor_pos.x, .y = 0};
+
+				add_editor_command(editor_read_index, editor_write_index, &data, sizeof(data));
+				break;
+			}
+
+			case UC_M: {
+				EditorCommandMoveData data = {.x = cursor_pos.x, .y = rows / 2};
+
+				add_editor_command(editor_read_index, editor_write_index, &data, sizeof(data));
+				break;
+			}
+
+			case UC_L: {
+				EditorCommandMoveData data = {.x = cursor_pos.x, .y = rows - 1};
+
+				add_editor_command(editor_read_index, editor_write_index, &data, sizeof(data));
+				break;
+			}
+
+			default:
+				break;
+		}
+
+		*user_read_index = *user_read_index + 1;
+	}
+}
+
+void process_editor_commands(
+	int *editor_read_index,
+	int *editor_write_index,
+	Pos *cursor_pos,
+	int rows,
+	int cols
+) {
+	while (*editor_read_index != *editor_write_index) {
+		switch (editor_commands[*editor_read_index].type) {
+			case EC_MOVE_CURSOR: {
+				EditorCommandMoveData data;
+				memcpy(&data, &editor_commands[*editor_read_index].data, sizeof(EditorCommandMoveData));
+
+				cursor_pos->x = data.x;
+				cursor_pos->y = data.y;
+
+				break;
+			}
+
+			default:
+				break;
+		}
+
+		*editor_read_index = *editor_read_index + 1;
+	}
+}
+
 int main(int argc, char * argv[]) {
 	srand(time(NULL));
 
@@ -253,7 +442,14 @@ int main(int argc, char * argv[]) {
 	int y_offset = 0;
 	int window_rows = rows - 2;
 	Pos cursor_pos = { .x = 0, .y = 0 };
-	char input_buf[128];
+
+	int user_command_read_index = 0;
+	int user_command_write_index = 0;
+
+	int editor_command_read_index = 0;
+	int editor_command_write_index = 0;
+
+	char user_input_buf[256];
 
 	BufferStatus buffer_status = {};
 	buffer_status.filename = "empty buffer";
@@ -272,45 +468,18 @@ int main(int argc, char * argv[]) {
 	switch_grids();
 
 	while (!exit_loop) {
-		int k = b_read_input(&input_buf);
+		handle_user_input(user_input_buf, &user_command_read_index, &user_command_write_index);
+		process_user_commands(
+			&user_command_read_index,
+			&user_command_write_index,
+			&editor_command_read_index,
+			&editor_command_write_index,
+			cursor_pos,
+			window_rows,
+			cols
+		);
 
-		for (int i = 0; i < k; i++) {
-			switch (input_buf[i]) {
-				case 'j':
-					if (cursor_pos.y == window_rows - 1)
-						y_offset++;
-
-					cursor_pos.y = MIN(window_rows - 1, cursor_pos.y + 1);
-					break;
-
-				case 'k':
-					cursor_pos.y = MAX(0, cursor_pos.y - 1);
-					break;
-
-				case 'l':
-					cursor_pos.x = MIN(cols, cursor_pos.x + 1);
-					break;
-
-				case 'h':
-					cursor_pos.x = MAX(0, cursor_pos.x - 1);
-					break;
-
-				case 'M':
-					cursor_pos.y = window_rows / 2;
-					break;
-
-				case 'H':
-					cursor_pos.y = 0;
-					break;
-
-				case 'L':
-					cursor_pos.y = window_rows - 1;
-					break;
-
-				default:
-					break;
-			}
-		}
+		process_editor_commands(&editor_command_read_index, &editor_command_write_index, &cursor_pos, window_rows, cols);
 
 		buffer_status.column = cursor_pos.x;
 		buffer_status.line = cursor_pos.y;
