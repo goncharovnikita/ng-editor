@@ -13,6 +13,8 @@
 #define MAX(a,b) (((a)>(b))?(a):(b))
 #define MAX_GRID_SIZE 65535
 #define MAX_COMMANDS_BUFFER_SIZE 1
+#define STATUS_COLUMN_WIDTH 5
+#define INFO_LINE_HEIGHT 2
 
 static struct termios old_termios, new_termios;
 
@@ -30,7 +32,7 @@ typedef enum {
 	CLEAR,
 	CURSOR,
 	INFO_LINE,
-	BLUE,
+	HIGHLIGHT,
 	WHITE,
 } Color;
 
@@ -131,8 +133,8 @@ void r_set_color(Color color) {
 			fprintf(stdout, "\033[30;47m");
 			break;
 
-		case BLUE:
-			fprintf(stdout, "\033[34m");
+		case HIGHLIGHT:
+			fprintf(stdout, "\033[30;44m");
 			break;
 
 		case WHITE:
@@ -273,6 +275,28 @@ void draw_info_line(int y, int cols, BufferStatus status) {
 
 	for (int i = 0; i < strlen(line_and_column_text); i++) {
 		current_grid[get_grid_index(cols - i - 1, y, cols)].symbol = line_and_column_text[line_and_column_text_len - 1 - i];
+	}
+}
+
+void draw_status_column(View dest, int rows, int cols, int offset) {
+	for (int y = dest.origin.y; y < dest.end.y; y++) {
+		char column_text[256] = {0};
+		sprintf(column_text, "%d", y + offset + 1);
+
+		int column_text_size = strlen(column_text);
+
+		for (int x = dest.origin.x; x < dest.end.x && (x - dest.origin.x < column_text_size); x++) {
+			int grid_index = get_grid_index(x + (dest.origin.x * (y + 1)), y + dest.origin.y, cols);
+			current_grid[grid_index].symbol = column_text[x - dest.origin.x];
+		}
+	}
+}
+
+void highlight_line(int row, int cols, int y_offset, int x_offset) {
+	int y = row + y_offset;
+
+	for (int x = x_offset; x < cols; x++) {
+		current_grid[get_grid_index(x, y, cols)].color = HIGHLIGHT;
 	}
 }
 
@@ -465,10 +489,21 @@ int main(int argc, char * argv[]) {
 	buffer_status.column = 0;
 
 	View initial_buffer_view;
-	initial_buffer_view.origin.x = 3;
+	initial_buffer_view.origin.x = STATUS_COLUMN_WIDTH;
 	initial_buffer_view.origin.y = 0;
 	initial_buffer_view.end.x = cols;
-	initial_buffer_view.end.y = rows - 2;
+	initial_buffer_view.end.y = rows - INFO_LINE_HEIGHT;
+
+	View status_column_view = {
+		.origin = {
+			.x = 0,
+			.y = 0,
+		},
+		.end = {
+			.x = STATUS_COLUMN_WIDTH,
+			.y = rows - INFO_LINE_HEIGHT,
+		},
+	};
 
 	if (argc > 1) {
 		fill_source_file_grid(
@@ -479,8 +514,11 @@ int main(int argc, char * argv[]) {
 	}
 
 	draw_source_file(initial_buffer_view, y_offset, x_offset);
+	highlight_line(cursor_pos.y, cols, y_offset, STATUS_COLUMN_WIDTH);
 	draw_cursor(initial_buffer_view, cursor_pos.x, cursor_pos.y, cols);
-	draw_info_line(rows - 2, cols, buffer_status);
+	draw_info_line(rows - INFO_LINE_HEIGHT, cols, buffer_status);
+	draw_status_column(status_column_view, rows, cols, y_offset);
+
 	render(rows, cols);
 	switch_grids();
 
@@ -508,8 +546,10 @@ int main(int argc, char * argv[]) {
 		buffer_status.line = cursor_pos.y;
 
 		draw_source_file(initial_buffer_view, x_offset, y_offset);
+		highlight_line(cursor_pos.y, cols, y_offset, STATUS_COLUMN_WIDTH);
 		draw_cursor(initial_buffer_view, cursor_pos.x, cursor_pos.y, cols);
-		draw_info_line(rows - 2, cols, buffer_status);
+		draw_info_line(rows - INFO_LINE_HEIGHT, cols, buffer_status);
+		draw_status_column(status_column_view, rows, cols, y_offset);
 
 		render(rows, cols);
 		switch_grids();
