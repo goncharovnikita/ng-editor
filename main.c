@@ -126,7 +126,7 @@ void r_clear_screen() {
 void r_set_color(Color color) {
 	switch (color) {
 		case CURSOR:
-			fprintf(stdout, "\033[30;47m");
+			fprintf(stdout, "\033[90;107m");
 			break;
 
 		case INFO_LINE:
@@ -134,7 +134,7 @@ void r_set_color(Color color) {
 			break;
 
 		case HIGHLIGHT:
-			fprintf(stdout, "\033[30;44m");
+			fprintf(stdout, "\033[48;5;240m");
 			break;
 
 		case WHITE:
