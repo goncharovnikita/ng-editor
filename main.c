@@ -67,9 +67,18 @@ typedef struct {
 	UserCommandType type;
 } UserCommand;
 
+typedef enum {
+	ED_UP,
+	ED_RIGHT,
+	ED_DOWN,
+	ED_LEFT,
+	ED_TOP,
+	ED_MID,
+	ED_LOW,
+} EditorDirection;
+
 typedef struct {
-	int x;
-	int y;
+	EditorDirection direction;
 } EditorCommandMoveData;
 
 typedef struct {
@@ -292,10 +301,10 @@ void draw_status_column(View dest, int rows, int cols, int offset) {
 	}
 }
 
-void highlight_line(int row, int cols, int y_offset, int x_offset) {
-	int y = row + y_offset;
+void highlight_line(View dest, int row, int cols) {
+	int y = row;
 
-	for (int x = x_offset; x < cols; x++) {
+	for (int x = dest.origin.x; x < dest.end.x; x++) {
 		current_grid[get_grid_index(x, y, cols)].color = HIGHLIGHT;
 	}
 }
@@ -350,14 +359,20 @@ void handle_user_input(char *input_buf, int *buffer_read_index, int *buffer_writ
 	}
 }
 
-void add_editor_command(int *read_index, int *write_index, void *data, int size_of_data) {
+void add_editor_command(
+		int *read_index,
+		int *write_index,
+		EditorCommandType command_type,
+		void *data,
+		int size_of_data
+) {
 	if (*write_index >= MAX_COMMANDS_BUFFER_SIZE) {
 		*write_index = 0;
 		*read_index = 0;
 	}
 
 	memcpy(&editor_commands[*write_index].data, data, size_of_data);
-	editor_commands[*write_index].type = EC_MOVE_CURSOR;
+	editor_commands[*write_index].type = command_type;
 
 	*write_index = *write_index + 1;
 }
@@ -366,59 +381,56 @@ void process_user_commands(
 	int *user_read_index,
 	int *user_write_index,
 	int *editor_read_index,
-	int *editor_write_index,
-	Pos cursor_pos,
-	int rows,
-	int cols
+	int *editor_write_index
 ) {
 	while (*user_read_index != *user_write_index) {
 		switch (user_commands[*user_read_index].type) {
 			case UC_h: {
-				EditorCommandMoveData data = {.x = MAX(0, cursor_pos.x - 1), .y = cursor_pos.y};
+				EditorCommandMoveData data = {.direction = ED_LEFT};
 
-				add_editor_command(editor_read_index, editor_write_index, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
 				break;
 			}
 
 			case UC_j: {
-				EditorCommandMoveData data = {.x = cursor_pos.x, .y = MIN(rows - 1, cursor_pos.y + 1)};
+				EditorCommandMoveData data = {.direction = ED_DOWN};
 
-				add_editor_command(editor_read_index, editor_write_index, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
 				break;
 			}
 
 			case UC_k: {
-				EditorCommandMoveData data = {.x = cursor_pos.x, .y = MAX(0, cursor_pos.y - 1)};
+				EditorCommandMoveData data = {.direction = ED_UP};
 
-				add_editor_command(editor_read_index, editor_write_index, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
 				break;
 			}
 
 			case UC_l: {
-				EditorCommandMoveData data = {.x = MIN(cols, cursor_pos.x + 1), .y = cursor_pos.y};
+				EditorCommandMoveData data = {.direction = ED_RIGHT};
 
-				add_editor_command(editor_read_index, editor_write_index, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
 				break;
 			}
 
 			case UC_H: {
-				EditorCommandMoveData data = {.x = cursor_pos.x, .y = 0};
+				EditorCommandMoveData data = {.direction = ED_TOP};
 
-				add_editor_command(editor_read_index, editor_write_index, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
 				break;
 			}
 
 			case UC_M: {
-				EditorCommandMoveData data = {.x = cursor_pos.x, .y = rows / 2};
+				EditorCommandMoveData data = {.direction = ED_MID};
 
-				add_editor_command(editor_read_index, editor_write_index, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
 				break;
 			}
 
 			case UC_L: {
-				EditorCommandMoveData data = {.x = cursor_pos.x, .y = rows - 1};
+				EditorCommandMoveData data = {.direction = ED_LOW};
 
-				add_editor_command(editor_read_index, editor_write_index, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
 				break;
 			}
 
@@ -435,7 +447,9 @@ void process_editor_commands(
 	int *editor_write_index,
 	Pos *cursor_pos,
 	int rows,
-	int cols
+	int cols,
+	int *x_offset,
+	int *y_offset
 ) {
 	while (*editor_read_index != *editor_write_index) {
 		switch (editor_commands[*editor_read_index].type) {
@@ -443,8 +457,57 @@ void process_editor_commands(
 				EditorCommandMoveData data;
 				memcpy(&data, &editor_commands[*editor_read_index].data, sizeof(EditorCommandMoveData));
 
-				cursor_pos->x = data.x;
-				cursor_pos->y = data.y;
+				switch (data.direction) {
+					case ED_LEFT: {
+						cursor_pos->x = MAX(0, cursor_pos->x - 1);
+
+						break;
+					}
+
+					case ED_DOWN: {
+						int target_y = cursor_pos->y + 1;
+
+						if (target_y >= rows - 1) {
+							*y_offset = *y_offset + 1;
+
+							target_y = rows - 1;
+						}
+
+						cursor_pos->y = MIN(rows - 1, target_y);
+
+						break;
+					}
+
+					case ED_UP: {
+						cursor_pos->y = MAX(0, cursor_pos->y - 1);
+
+						break;
+					}
+
+					case ED_RIGHT: {
+						cursor_pos->x = MIN(cols - 1, cursor_pos->x + 1);
+
+						break;
+					}
+
+					case ED_TOP: {
+						cursor_pos->y = 0;
+
+						break;
+					}
+
+					case ED_MID: {
+						cursor_pos->y = rows / 2;
+
+						break;
+					}
+
+					case ED_LOW: {
+						cursor_pos->y = rows - 1;
+
+						break;
+					}
+				}
 
 				break;
 			}
@@ -514,7 +577,7 @@ int main(int argc, char * argv[]) {
 	}
 
 	draw_source_file(initial_buffer_view, y_offset, x_offset);
-	highlight_line(cursor_pos.y, cols, y_offset, STATUS_COLUMN_WIDTH);
+	highlight_line(initial_buffer_view, cursor_pos.y, cols);
 	draw_cursor(initial_buffer_view, cursor_pos.x, cursor_pos.y, cols);
 	draw_info_line(rows - INFO_LINE_HEIGHT, cols, buffer_status);
 	draw_status_column(status_column_view, rows, cols, y_offset);
@@ -528,10 +591,7 @@ int main(int argc, char * argv[]) {
 			&user_command_read_index,
 			&user_command_write_index,
 			&editor_command_read_index,
-			&editor_command_write_index,
-			cursor_pos,
-			initial_buffer_view.end.y - initial_buffer_view.origin.y,
-			initial_buffer_view.end.x - initial_buffer_view.origin.x
+			&editor_command_write_index
 		);
 
 		process_editor_commands(
@@ -539,14 +599,16 @@ int main(int argc, char * argv[]) {
 			&editor_command_write_index,
 			&cursor_pos,
 			initial_buffer_view.end.y - initial_buffer_view.origin.y,
-			initial_buffer_view.end.x - initial_buffer_view.origin.x
+			initial_buffer_view.end.x - initial_buffer_view.origin.x,
+			&x_offset,
+			&y_offset
 		);
 
 		buffer_status.column = cursor_pos.x;
 		buffer_status.line = cursor_pos.y;
 
 		draw_source_file(initial_buffer_view, x_offset, y_offset);
-		highlight_line(cursor_pos.y, cols, y_offset, STATUS_COLUMN_WIDTH);
+		highlight_line(initial_buffer_view, cursor_pos.y, cols);
 		draw_cursor(initial_buffer_view, cursor_pos.x, cursor_pos.y, cols);
 		draw_info_line(rows - INFO_LINE_HEIGHT, cols, buffer_status);
 		draw_status_column(status_column_view, rows, cols, y_offset);
