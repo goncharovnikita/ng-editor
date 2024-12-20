@@ -37,7 +37,7 @@ typedef enum {
 } Color;
 
 typedef enum {
-	EC_MOVE_CURSOR,
+	EC_NAVIGATE,
 } EditorCommandType;
 
 typedef enum {
@@ -45,6 +45,8 @@ typedef enum {
 	UC_j,
 	UC_k,
 	UC_l,
+	UC_w,
+	UC_b,
 	UC_H,
 	UC_M,
 	UC_L,
@@ -78,6 +80,8 @@ typedef enum {
 	ED_CURSOR_TOP,
 	ED_CURSOR_MID,
 	ED_CURSOR_BOTTOM,
+	ED_CURSOR_TO_NEXT_WORD,
+	ED_CURSOR_TO_PREV_WORD,
 	ED_SCROLL_HALF_DOWN,
 	ED_SCROLL_HALF_UP,
 	ED_SCROLL_BOTTOM,
@@ -99,6 +103,7 @@ typedef struct {
 	int* total_rows;
 	int* x_offset;
 	int* y_offset;
+	Pos* cursor_pos;
 } DebugInformation;
 
 bool exit_loop = false;
@@ -361,6 +366,11 @@ void draw_debug_information(View dest, int cols, DebugInformation debug_info) {
 			sprintf(text, "x_offset: %d, y_offset: %d", *debug_info.x_offset, *debug_info.y_offset);
 			r_draw_line(dest.origin.x, y, dest.end.x - dest.origin.x, text);
 		}
+
+		if (lineno == 2) {
+			sprintf(text, "cursor_pos_x: %d, cursor_pos_y: %d", debug_info.cursor_pos->x, debug_info.cursor_pos->y);
+			r_draw_line(dest.origin.x, y, dest.end.x - dest.origin.x, text);
+		}
 	}
 }
 
@@ -370,6 +380,80 @@ void highlight_line(View dest, int row, int cols) {
 	for (int x = dest.origin.x; x < dest.end.x; x++) {
 		current_grid[get_grid_index(x, y, cols)].color = HIGHLIGHT;
 	}
+}
+
+bool nav_is_word_symbol(char sym) {
+	return sym != ' ';
+}
+
+Pos nav_find_next_word(View view, int cols, Pos cursor_pos) {
+	int target_x = cursor_pos.x;
+	int target_y = cursor_pos.y;
+
+	while (nav_is_word_symbol(current_grid[get_grid_index(target_x + (view.origin.x * (target_y + 1)), target_y + view.origin.y, cols)].symbol)) {
+		target_x++;
+
+		if (target_x + view.origin.x >= view.end.x) {
+			target_x = 0;
+			target_y++;
+		}
+
+		if (target_y + view.origin.y > view.end.y) {
+			return cursor_pos;
+		}
+	}
+
+	while (!nav_is_word_symbol(current_grid[get_grid_index(target_x + (view.origin.x * (target_y + 1)), target_y + view.origin.y, cols)].symbol)) {
+		target_x++;
+
+		if (target_x + view.origin.x >= view.end.x) {
+			target_x = 0;
+			target_y++;
+		}
+
+		if (target_y + view.origin.y > view.end.y) {
+			return cursor_pos;
+		}
+	}
+
+	Pos target_pos = {.x = target_x, .y = target_y};
+
+	return target_pos;
+}
+
+Pos nav_find_prev_word(View view, int cols, Pos cursor_pos) {
+	int target_x = cursor_pos.x;
+	int target_y = cursor_pos.y;
+
+	while (nav_is_word_symbol(current_grid[get_grid_index(target_x + (view.origin.x * (target_y + 1)), target_y + view.origin.y, cols)].symbol)) {
+		target_x--;
+
+		if (target_x < 0) {
+			target_x = view.end.x;
+			target_y--;
+		}
+
+		if (target_y < 0) {
+			return cursor_pos;
+		}
+	}
+
+	while (!nav_is_word_symbol(current_grid[get_grid_index(target_x + (view.origin.x * (target_y + 1)), target_y + view.origin.y, cols)].symbol)) {
+		target_x--;
+
+		if (target_x < 0) {
+			target_x = view.end.x;
+			target_y--;
+		}
+
+		if (target_y < 0) {
+			return cursor_pos;
+		}
+	}
+
+	Pos target_pos = {.x = target_x, .y = target_y};
+
+	return target_pos;
 }
 
 void add_user_command(int *read_index, int *write_index, UserCommandType type) {
@@ -402,6 +486,14 @@ void handle_user_input(char *input_buf, int *buffer_read_index, int *buffer_writ
 
 			case 'h':
 				add_user_command(buffer_read_index, buffer_write_index, UC_h);
+				break;
+
+			case 'w':
+				add_user_command(buffer_read_index, buffer_write_index, UC_w);
+				break;
+
+			case 'b':
+				add_user_command(buffer_read_index, buffer_write_index, UC_b);
 				break;
 
 			case 'M':
@@ -463,70 +555,84 @@ void process_user_commands(
 			case UC_h: {
 				EditorCommandMoveData data = {.direction = ED_CURSOR_LEFT};
 
-				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_NAVIGATE, &data, sizeof(data));
 				break;
 			}
 
 			case UC_j: {
 				EditorCommandMoveData data = {.direction = ED_CURSOR_DOWN};
 
-				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_NAVIGATE, &data, sizeof(data));
 				break;
 			}
 
 			case UC_k: {
 				EditorCommandMoveData data = {.direction = ED_CURSOR_UP};
 
-				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_NAVIGATE, &data, sizeof(data));
 				break;
 			}
 
 			case UC_l: {
 				EditorCommandMoveData data = {.direction = ED_CURSOR_RIGHT};
 
-				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_NAVIGATE, &data, sizeof(data));
+				break;
+			}
+
+			case UC_w: {
+				EditorCommandMoveData data = {.direction = ED_CURSOR_TO_NEXT_WORD};
+
+				add_editor_command(editor_read_index, editor_write_index, EC_NAVIGATE, &data, sizeof(data));
+				break;
+			}
+
+			case UC_b: {
+				EditorCommandMoveData data = {.direction = ED_CURSOR_TO_PREV_WORD};
+
+				add_editor_command(editor_read_index, editor_write_index, EC_NAVIGATE, &data, sizeof(data));
 				break;
 			}
 
 			case UC_H: {
 				EditorCommandMoveData data = {.direction = ED_CURSOR_TOP};
 
-				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_NAVIGATE, &data, sizeof(data));
 				break;
 			}
 
 			case UC_M: {
 				EditorCommandMoveData data = {.direction = ED_CURSOR_MID};
 
-				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_NAVIGATE, &data, sizeof(data));
 				break;
 			}
 
 			case UC_L: {
 				EditorCommandMoveData data = {.direction = ED_CURSOR_BOTTOM};
 
-				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_NAVIGATE, &data, sizeof(data));
 				break;
 			}
 
 			case UC_G: {
 				EditorCommandMoveData data = {.direction = ED_SCROLL_BOTTOM};
 
-				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_NAVIGATE, &data, sizeof(data));
 				break;
 			}
 
 			case UC_CTRL_D: {
 				EditorCommandMoveData data = {.direction = ED_SCROLL_HALF_DOWN};
 
-				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_NAVIGATE, &data, sizeof(data));
 				break;
 			}
 
 			case UC_CTRL_U: {
 				EditorCommandMoveData data = {.direction = ED_SCROLL_HALF_UP};
 
-				add_editor_command(editor_read_index, editor_write_index, EC_MOVE_CURSOR, &data, sizeof(data));
+				add_editor_command(editor_read_index, editor_write_index, EC_NAVIGATE, &data, sizeof(data));
 				break;
 			}
 		}
@@ -539,6 +645,7 @@ void process_editor_commands(
 	int *editor_read_index,
 	int *editor_write_index,
 	Pos *cursor_pos,
+	View active_view,
 	int rows,
 	int cols,
 	int total_rows,
@@ -547,7 +654,7 @@ void process_editor_commands(
 ) {
 	while (*editor_read_index != *editor_write_index) {
 		switch (editor_commands[*editor_read_index].type) {
-			case EC_MOVE_CURSOR: {
+			case EC_NAVIGATE: {
 				EditorCommandMoveData data;
 				memcpy(&data, &editor_commands[*editor_read_index].data, sizeof(EditorCommandMoveData));
 
@@ -608,6 +715,24 @@ void process_editor_commands(
 
 					case ED_CURSOR_BOTTOM: {
 						cursor_pos->y = rows - 1;
+
+						break;
+					}
+
+					case ED_CURSOR_TO_NEXT_WORD: {
+						Pos target_pos = nav_find_next_word(active_view, cols, *cursor_pos);
+
+						cursor_pos->x = target_pos.x;
+						cursor_pos->y = target_pos.y;
+
+						break;
+					}
+
+					case ED_CURSOR_TO_PREV_WORD: {
+						Pos target_pos = nav_find_prev_word(active_view, cols, *cursor_pos);
+
+						cursor_pos->x = target_pos.x;
+						cursor_pos->y = target_pos.y;
 
 						break;
 					}
@@ -739,6 +864,7 @@ int main(int argc, char * argv[]) {
 		.total_rows = &total_rows,
 		.x_offset = &x_offset,
 		.y_offset = &y_offset,
+		.cursor_pos = &cursor_pos,
 	};
 
 	draw_source_file(initial_buffer_view, y_offset, x_offset);
@@ -764,6 +890,7 @@ int main(int argc, char * argv[]) {
 			&editor_command_read_index,
 			&editor_command_write_index,
 			&cursor_pos,
+			initial_buffer_view,
 			initial_buffer_view.end.y - initial_buffer_view.origin.y,
 			initial_buffer_view.end.x - initial_buffer_view.origin.x,
 			total_rows,
