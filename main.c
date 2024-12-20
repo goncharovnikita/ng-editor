@@ -119,6 +119,19 @@ int get_grid_index(int x, int y, int cols) {
 	return (y * cols) + x;
 }
 
+int get_view_grid_index(View view, int x, int y, int cols) {
+	return get_grid_index(x + (view.origin.x * (y + 1)), y + view.origin.y, cols);
+}
+
+bool pos_is_equal(Pos a, Pos b) {
+	return a.x == b.x && a.y == b.y;
+}
+
+void pos_copy(Pos* to, Pos* from) {
+	to->x = from->x;
+	to->y = from->y;
+}
+
 void s_configure_terminal() {
 	tcgetattr(STDIN_FILENO, &old_termios);
 	new_termios = old_termios;
@@ -386,74 +399,100 @@ bool nav_is_word_symbol(char sym) {
 	return sym != ' ';
 }
 
-Pos nav_find_next_word(View view, int cols, Pos cursor_pos) {
+bool nav_cursor_forward_position(View view, Pos cursor_pos, Pos* dest_pos) {
 	int target_x = cursor_pos.x;
 	int target_y = cursor_pos.y;
 
-	while (nav_is_word_symbol(current_grid[get_grid_index(target_x + (view.origin.x * (target_y + 1)), target_y + view.origin.y, cols)].symbol)) {
-		target_x++;
+	target_x++;
 
-		if (target_x + view.origin.x >= view.end.x) {
-			target_x = 0;
-			target_y++;
-		}
-
-		if (target_y + view.origin.y > view.end.y) {
-			return cursor_pos;
-		}
+	if (target_x >= view.end.x - view.origin.x) {
+		target_x = 0;
+		target_y++;
 	}
 
-	while (!nav_is_word_symbol(current_grid[get_grid_index(target_x + (view.origin.x * (target_y + 1)), target_y + view.origin.y, cols)].symbol)) {
-		target_x++;
-
-		if (target_x + view.origin.x >= view.end.x) {
-			target_x = 0;
-			target_y++;
-		}
-
-		if (target_y + view.origin.y > view.end.y) {
-			return cursor_pos;
-		}
+	if (target_y >= view.end.y - view.origin.y) {
+		return false;
 	}
 
-	Pos target_pos = {.x = target_x, .y = target_y};
+	dest_pos->x = target_x;
+	dest_pos->y = target_y;
 
-	return target_pos;
+	return true;
 }
 
-Pos nav_find_prev_word(View view, int cols, Pos cursor_pos) {
+bool nav_cursor_back_position(View view, Pos cursor_pos, Pos* dest_pos) {
 	int target_x = cursor_pos.x;
 	int target_y = cursor_pos.y;
 
-	while (nav_is_word_symbol(current_grid[get_grid_index(target_x + (view.origin.x * (target_y + 1)), target_y + view.origin.y, cols)].symbol)) {
-		target_x--;
+	target_x--;
 
-		if (target_x < 0) {
-			target_x = view.end.x;
-			target_y--;
-		}
-
-		if (target_y < 0) {
-			return cursor_pos;
-		}
+	if (target_x < 0) {
+		target_x = view.end.x - view.origin.x - 1;
+		target_y--;
 	}
 
-	while (!nav_is_word_symbol(current_grid[get_grid_index(target_x + (view.origin.x * (target_y + 1)), target_y + view.origin.y, cols)].symbol)) {
-		target_x--;
-
-		if (target_x < 0) {
-			target_x = view.end.x;
-			target_y--;
-		}
-
-		if (target_y < 0) {
-			return cursor_pos;
-		}
+	if (target_y < 0) {
+		return false;
 	}
 
-	Pos target_pos = {.x = target_x, .y = target_y};
+	dest_pos->x = target_x;
+	dest_pos->y = target_y;
 
-	return target_pos;
+	return true;
+}
+
+bool nav_find_next_word(View view, int cols, Pos cursor_pos, Pos* target_pos) {
+	Pos new_cursor = cursor_pos;
+
+	while (!nav_is_word_symbol(current_grid[get_view_grid_index(view, new_cursor.x, new_cursor.y, cols)].symbol)) {
+		if (!nav_cursor_forward_position(view, new_cursor, &new_cursor))
+			return false;
+	}
+
+	target_pos->x = new_cursor.x;
+	target_pos->y = new_cursor.y;
+
+	return true;
+}
+
+bool nav_find_prev_word(View view, int cols, Pos cursor_pos, Pos* target_pos) {
+	Pos new_cursor = cursor_pos;
+
+	while (!nav_is_word_symbol(current_grid[get_view_grid_index(view, new_cursor.x, new_cursor.y, cols)].symbol)) {
+		if (!nav_cursor_back_position(view, new_cursor, &new_cursor))
+			return false;
+	}
+
+	target_pos->x = new_cursor.x;
+	target_pos->y = new_cursor.y;
+
+	return true;
+}
+
+bool nav_find_end_of_word(View view, int cols, Pos cursor_pos, Pos* target_pos) {
+	Pos next_pos = cursor_pos;
+
+	while (nav_is_word_symbol(current_grid[get_view_grid_index(view, next_pos.x, next_pos.y, cols)].symbol)) {
+		pos_copy(target_pos, &next_pos);
+
+		if (!nav_cursor_forward_position(view, next_pos, &next_pos))
+			break;
+	}
+
+	return !pos_is_equal(cursor_pos, *target_pos);
+}
+
+bool nav_find_start_of_word(View view, int cols, Pos cursor_pos, Pos* target_pos) {
+	Pos next_pos = cursor_pos;
+
+	while (nav_is_word_symbol(current_grid[get_view_grid_index(view, next_pos.x, next_pos.y, cols)].symbol)) {
+		pos_copy(target_pos, &next_pos);
+
+		if (!nav_cursor_back_position(view, next_pos, &next_pos))
+			break;
+	}
+
+	return !pos_is_equal(cursor_pos, *target_pos);
 }
 
 void add_user_command(int *read_index, int *write_index, UserCommandType type) {
@@ -720,19 +759,18 @@ void process_editor_commands(
 					}
 
 					case ED_CURSOR_TO_NEXT_WORD: {
-						Pos target_pos = nav_find_next_word(active_view, cols, *cursor_pos);
-
-						cursor_pos->x = target_pos.x;
-						cursor_pos->y = target_pos.y;
+						nav_find_end_of_word(active_view, cols, *cursor_pos, cursor_pos);
+						nav_cursor_forward_position(active_view, *cursor_pos, cursor_pos);
+						nav_find_next_word(active_view, cols, *cursor_pos, cursor_pos);
 
 						break;
 					}
 
 					case ED_CURSOR_TO_PREV_WORD: {
-						Pos target_pos = nav_find_prev_word(active_view, cols, *cursor_pos);
-
-						cursor_pos->x = target_pos.x;
-						cursor_pos->y = target_pos.y;
+						nav_find_start_of_word(active_view, cols, *cursor_pos, cursor_pos);
+						nav_cursor_back_position(active_view, *cursor_pos, cursor_pos);
+						nav_find_prev_word(active_view, cols, *cursor_pos, cursor_pos);
+						nav_find_start_of_word(active_view, cols, *cursor_pos, cursor_pos);
 
 						break;
 					}
