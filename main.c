@@ -323,7 +323,7 @@ void draw_source_file(View dest, int x_offset, int y_offset) {
 	for (int y = 0; y < rows; y++) {
 		for (int x = 0; x < cols; x++) {
 			int source_index = get_grid_index(x + x_offset, y + y_offset, cols);
-			int grid_index = get_grid_index(x + (dest.origin.x * (y + 1)), y + dest.origin.y, cols);
+			int grid_index = get_view_grid_index(dest, x, y, cols);
 
 			memcpy(&current_grid[grid_index], &source_file_grid[source_index], sizeof(Cell));
 		}
@@ -372,7 +372,7 @@ void draw_status_column(View dest, int rows, int cols, int total_rows, int offse
 void draw_debug_information(View dest, int cols, DebugInformation debug_info) {
 	for (int y = dest.origin.y; y < dest.end.y; y++) {
 		int lineno = y - dest.origin.y;
-		int grid_index = get_grid_index(dest.origin.x + (dest.origin.x * (y + 1)), y + dest.origin.y, cols);
+		int grid_index = get_view_grid_index(dest, dest.origin.x, y, cols);
 
 		char text[dest.end.x - dest.origin.x];
 
