@@ -143,7 +143,7 @@ void s_configure_terminal() {
 	new_termios = old_termios;
 
 	new_termios.c_lflag &= ~(ICANON | ECHO);
-	new_termios.c_cc[VMIN] = 0;
+	new_termios.c_cc[VMIN] = 1;
 	new_termios.c_cc[VTIME] = 0;
 
 	tcsetattr(STDIN_FILENO, TCSANOW, &new_termios);
@@ -517,8 +517,11 @@ void add_user_command(int *read_index, int *write_index, UserCommandType type) {
 	*write_index = *write_index + 1;
 }
 
-void handle_user_input(char *input_buf, int *buffer_read_index, int *buffer_write_index) {
+bool handle_user_input(char *input_buf, int *buffer_read_index, int *buffer_write_index) {
 	int k = b_read_input(input_buf);
+
+	if (k == 0)
+		return false;
 
 	for (int i = 0; i < k; i++) {
 		switch (input_buf[i]) {
@@ -578,6 +581,8 @@ void handle_user_input(char *input_buf, int *buffer_read_index, int *buffer_writ
 				break;
 		}
 	}
+
+	return true;
 }
 
 void add_editor_command(
@@ -949,7 +954,9 @@ int main(int argc, char * argv[]) {
 	switch_grids();
 
 	while (!exit_loop) {
-		handle_user_input(user_input_buf, &user_command_read_index, &user_command_write_index);
+		if (!handle_user_input(user_input_buf, &user_command_read_index, &user_command_write_index))
+			continue;
+
 		process_user_commands(
 			&user_command_read_index,
 			&user_command_write_index,
