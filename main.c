@@ -46,6 +46,7 @@ typedef enum {
 	UC_k,
 	UC_l,
 	UC_w,
+	UC_e,
 	UC_b,
 	UC_H,
 	UC_M,
@@ -81,6 +82,7 @@ typedef enum {
 	ED_CURSOR_MID,
 	ED_CURSOR_BOTTOM,
 	ED_CURSOR_TO_NEXT_WORD,
+	ED_CURSOR_TO_END_OF_WORD,
 	ED_CURSOR_TO_PREV_WORD,
 	ED_SCROLL_HALF_DOWN,
 	ED_SCROLL_HALF_UP,
@@ -107,6 +109,10 @@ typedef struct {
 } DebugInformation;
 
 bool exit_loop = false;
+
+const char conf_non_word_symbols[] = {
+	' ',
+};
 
 Grid rendered_grid = {};
 Grid current_grid = {};
@@ -396,7 +402,12 @@ void highlight_line(View dest, int row, int cols) {
 }
 
 bool nav_is_word_symbol(char sym) {
-	return sym != ' ';
+	for (int i = 0; i < strlen(conf_non_word_symbols); i++) {
+		if (sym == conf_non_word_symbols[i])
+			return false;
+	}
+
+	return true;
 }
 
 bool nav_cursor_forward_position(View view, Pos cursor_pos, Pos* dest_pos) {
@@ -531,6 +542,10 @@ void handle_user_input(char *input_buf, int *buffer_read_index, int *buffer_writ
 				add_user_command(buffer_read_index, buffer_write_index, UC_w);
 				break;
 
+			case 'e':
+				add_user_command(buffer_read_index, buffer_write_index, UC_e);
+				break;
+
 			case 'b':
 				add_user_command(buffer_read_index, buffer_write_index, UC_b);
 				break;
@@ -628,6 +643,13 @@ void process_user_commands(
 
 			case UC_b: {
 				EditorCommandMoveData data = {.direction = ED_CURSOR_TO_PREV_WORD};
+
+				add_editor_command(editor_read_index, editor_write_index, EC_NAVIGATE, &data, sizeof(data));
+				break;
+			}
+
+			case UC_e: {
+				EditorCommandMoveData data = {.direction = ED_CURSOR_TO_END_OF_WORD};
 
 				add_editor_command(editor_read_index, editor_write_index, EC_NAVIGATE, &data, sizeof(data));
 				break;
@@ -762,6 +784,17 @@ void process_editor_commands(
 						nav_find_end_of_word(active_view, cols, *cursor_pos, cursor_pos);
 						nav_cursor_forward_position(active_view, *cursor_pos, cursor_pos);
 						nav_find_next_word(active_view, cols, *cursor_pos, cursor_pos);
+
+						break;
+					}
+
+					case ED_CURSOR_TO_END_OF_WORD: {
+						if (nav_find_end_of_word(active_view, cols, *cursor_pos, cursor_pos))
+							break;
+
+						nav_cursor_forward_position(active_view, *cursor_pos, cursor_pos);
+						nav_find_next_word(active_view, cols, *cursor_pos, cursor_pos);
+						nav_find_end_of_word(active_view, cols, *cursor_pos, cursor_pos);
 
 						break;
 					}
