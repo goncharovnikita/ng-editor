@@ -15,6 +15,7 @@
 #define MAX_GRID_SIZE 65535
 #define MAX_COMMANDS_BUFFER_SIZE 1
 #define MAX_COMMAND_SIZE 4096
+#define MAX_MESSAGE_SIZE 1024
 #define STATUS_COLUMN_WIDTH 5
 #define INFO_LINE_HEIGHT 2
 
@@ -29,6 +30,12 @@ typedef struct {
 	Pos origin;
 	Pos end;
 } View;
+
+typedef enum {
+	MODE_NORMAL,
+	MODE_COMMAND,
+	MODE_INSERT,
+} ModeType;
 
 typedef enum {
 	CLEAR,
@@ -100,11 +107,15 @@ typedef struct {
 typedef struct {
 	int count;
 	char command[MAX_COMMAND_SIZE];
-} UserIntermediateCommand;
+} NormalModeCommand;
 
 typedef struct {
-	char *message;
-	UserIntermediateCommand* user_intermediate_command;
+	char command[MAX_COMMAND_SIZE];
+} CommandModeCommand;
+
+typedef struct {
+	char message[MAX_MESSAGE_SIZE];
+	NormalModeCommand* normal_mode_command;
 } MessageLineData;
 
 typedef enum {
@@ -163,7 +174,7 @@ const char conf_non_word_symbols[] = {
 	'\t',
 };
 
-const char* conf_valid_commands[] = {
+const char* conf_normal_mode_valid_commands[] = {
 	"",
 	"h", "j", "k", "l",
 	"^", "$",
@@ -173,6 +184,13 @@ const char* conf_valid_commands[] = {
 	"\x04", // CTRL-d
 	"\x15", // CTRL-u
 	"\x1b", // CTRL-[
+	":",
+
+	"-1",
+};
+
+const char* conf_command_mode_valid_commands[] = {
+	"q", "quit",
 
 	"-1",
 };
@@ -184,16 +202,24 @@ LineItemT* cursor_line_item;
 LineT* cursor_line;
 int source_file_items_count = 0;
 
+ModeType mode_type;
+
 UserCommand user_commands[MAX_COMMANDS_BUFFER_SIZE] = {};
 EditorCommand editor_commands[MAX_COMMANDS_BUFFER_SIZE] = {};
 
 EditorConfig editor_config = {.scroll = 1};
 
-UserIntermediateCommand user_intermediate_command = {.count = 0, .command = ""};
+NormalModeCommand normal_mode_command = {.count = 0, .command = ""};
+CommandModeCommand command_mode_command = {.command = ""};
+
 MessageLineData message_line_data = {
 	.message = "",
-	.user_intermediate_command = &user_intermediate_command
+	.normal_mode_command = &normal_mode_command
 };
+
+void mode_set_type(ModeType mt) {
+	mode_type = mt;
+}
 
 void editor_config_set_scroll(int scroll) {
 	editor_config.scroll = scroll;
@@ -205,6 +231,10 @@ int get_grid_index(int x, int y, int cols) {
 
 int get_view_grid_index(View view, int x, int y, int cols) {
 	return get_grid_index(x + view.origin.x, y + view.origin.y, cols);
+}
+
+void message_set(char* message) {
+	sprintf(message_line_data.message, "%s", message);
 }
 
 bool pos_is_equal(Pos a, Pos b) {
@@ -237,7 +267,7 @@ void s_restore_terminal() {
 	tcsetattr(STDIN_FILENO, TCSANOW, &old_termios);
 }
 
-void s_handle_sigint() {
+void s_exit_editor() {
 	exit_loop = true;
 }
 
@@ -476,31 +506,40 @@ void draw_info_line(int y, int cols, BufferStatus status) {
 	}
 }
 
-void draw_message_line(int y, int cols, MessageLineData data) {
+void draw_message_line(int y, int cols) {
 	for (int i = 0; i < cols; i++) {
 		current_grid[get_grid_index(i, y, cols)].symbol = ' ';
 		current_grid[get_grid_index(i, y, cols)].color = CLEAR;
 	}
 
-	for (int i = 0; i < strlen(data.message); i++) {
-		current_grid[get_grid_index(i, y, cols)].symbol = data.message[i];
-	}
+	if (mode_type == MODE_NORMAL) {
+		for (int i = 0; i < strlen(message_line_data.message); i++) {
+			current_grid[get_grid_index(i, y, cols)].symbol = message_line_data.message[i];
+		}
 
-	char user_modifier_text[256] = {0};
+		char user_modifier_text[256] = {0};
 
-	if (data.user_intermediate_command->count > 0)
-		sprintf(user_modifier_text, "%d", data.user_intermediate_command->count);
+		if (normal_mode_command.count > 0)
+			sprintf(user_modifier_text, "%d", normal_mode_command.count);
 
-	if (strlen(data.user_intermediate_command->command) > 0)
-		sprintf(user_modifier_text, "%s%s", user_modifier_text, data.user_intermediate_command->command);
+		if (strlen(normal_mode_command.command) > 0)
+			sprintf(user_modifier_text, "%s%s", user_modifier_text, normal_mode_command.command);
 
-	if (strlen(user_modifier_text) == 0)
-		sprintf(user_modifier_text, " ");
+		if (strlen(user_modifier_text) == 0)
+			sprintf(user_modifier_text, " ");
 
-	int line_and_column_text_len = strlen(user_modifier_text);
+		int line_and_column_text_len = strlen(user_modifier_text);
 
-	for (int i = 0; i < strlen(user_modifier_text); i++) {
-		current_grid[get_grid_index(cols - i - 1, y, cols)].symbol = user_modifier_text[line_and_column_text_len - 1 - i];
+		for (int i = 0; i < strlen(user_modifier_text); i++) {
+			current_grid[get_grid_index(cols - i - 1, y, cols)].symbol = user_modifier_text[line_and_column_text_len - 1 - i];
+		}
+	} else if (mode_type == MODE_COMMAND) {
+		char command_text[MAX_COMMAND_SIZE] = {0};
+		sprintf(command_text, ":%s", command_mode_command.command);
+
+		for (int i = 0; i < strlen(command_text); i++) {
+			current_grid[get_grid_index(i, y, cols)].symbol = command_text[i];
+		}
 	}
 }
 
@@ -870,21 +909,21 @@ void offset_sync_with_cursor(int* y_offset, Pos* cursor_pos, int rows, int total
 	}
 }
 
-void intermediate_command_clear() {
-	user_intermediate_command.count = 0;
+void normal_mode_command_clear() {
+	normal_mode_command.count = 0;
 
-	sprintf(user_intermediate_command.command, "");
+	sprintf(normal_mode_command.command, "");
 }
 
-void intermediate_command_add_count(int count) {
-	user_intermediate_command.count = user_intermediate_command.count * 10 + count;
+void normal_mode_command_add_count(int count) {
+	normal_mode_command.count = normal_mode_command.count * 10 + count;
 }
 
-bool intermediate_command_is_valid() {
+bool normal_mode_command_is_valid() {
 	int i = 0;
 
-	while (strcmp("-1", conf_valid_commands[i])) {
-		if (!strcmp(conf_valid_commands[i], user_intermediate_command.command))
+	while (strcmp("-1", conf_normal_mode_valid_commands[i])) {
+		if (!strcmp(conf_normal_mode_valid_commands[i], normal_mode_command.command))
 			return true;
 
 		i++;
@@ -893,8 +932,29 @@ bool intermediate_command_is_valid() {
 	return false;
 }
 
-void intermediate_command_add_char(char cmd_char) {
-	sprintf(user_intermediate_command.command, "%s%c", user_intermediate_command.command, cmd_char);
+void normal_mode_command_add_char(char cmd_char) {
+	sprintf(normal_mode_command.command, "%s%c", normal_mode_command.command, cmd_char);
+}
+
+void command_mode_command_clear() {
+	sprintf(command_mode_command.command, "");
+}
+
+void command_mode_add_char(char cmd_char) {
+	sprintf(command_mode_command.command, "%s%c", command_mode_command.command, cmd_char);
+}
+
+bool command_mode_command_is_valid() {
+	int i = 0;
+
+	while (strcmp("-1", conf_command_mode_valid_commands[i])) {
+		if (!strcmp(conf_command_mode_valid_commands[i], command_mode_command.command))
+			return true;
+
+		i++;
+	}
+
+	return false;
 }
 
 bool add_user_command(int *read_index, int *write_index, UserCommandType type, int count) {
@@ -908,64 +968,76 @@ bool add_user_command(int *read_index, int *write_index, UserCommandType type, i
 
 	*write_index = *write_index + 1;
 
-	intermediate_command_clear();
+	normal_mode_command_clear();
 
 	return true;
 }
 
-bool handle_intermediate_command(int* read_index, int* write_index) {
-	if (!strcmp("h", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_h, user_intermediate_command.count);
+bool handle_normal_mode_command(int* read_index, int* write_index) {
+	if (!strcmp(":", normal_mode_command.command)) {
+		mode_set_type(MODE_COMMAND);
+		normal_mode_command_clear();
 
-	if (!strcmp("j", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_j, user_intermediate_command.count);
+		return true;
+	}
 
-	if (!strcmp("k", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_k, user_intermediate_command.count);
+	if (!strcmp("h", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_h, normal_mode_command.count);
 
-	if (!strcmp("l", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_l, user_intermediate_command.count);
+	if (!strcmp("j", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_j, normal_mode_command.count);
 
-	if (!strcmp("^", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_caret, user_intermediate_command.count);
+	if (!strcmp("k", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_k, normal_mode_command.count);
 
-	if (!strcmp("$", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_dollar, user_intermediate_command.count);
+	if (!strcmp("l", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_l, normal_mode_command.count);
 
-	if (!strcmp("w", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_w, user_intermediate_command.count);
+	if (!strcmp("^", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_caret, normal_mode_command.count);
 
-	if (!strcmp("e", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_e, user_intermediate_command.count);
+	if (!strcmp("$", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_dollar, normal_mode_command.count);
 
-	if (!strcmp("b", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_b, user_intermediate_command.count);
+	if (!strcmp("w", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_w, normal_mode_command.count);
 
-	if (!strcmp("H", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_H, user_intermediate_command.count);
+	if (!strcmp("e", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_e, normal_mode_command.count);
 
-	if (!strcmp("M", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_M, user_intermediate_command.count);
+	if (!strcmp("b", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_b, normal_mode_command.count);
 
-	if (!strcmp("L", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_L, user_intermediate_command.count);
+	if (!strcmp("H", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_H, normal_mode_command.count);
 
-	if (!strcmp("gg", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_gg, user_intermediate_command.count);
+	if (!strcmp("M", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_M, normal_mode_command.count);
 
-	if (!strcmp("G", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_G, user_intermediate_command.count);
+	if (!strcmp("L", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_L, normal_mode_command.count);
 
-	if (!strcmp("\x04", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_CTRL_d, user_intermediate_command.count);
+	if (!strcmp("gg", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_gg, normal_mode_command.count);
 
-	if (!strcmp("\x15", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_CTRL_u, user_intermediate_command.count);
+	if (!strcmp("G", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_G, normal_mode_command.count);
 
-	if (!strcmp("\x1b", user_intermediate_command.command))
-		return add_user_command(read_index, write_index, UC_esc, user_intermediate_command.count);
+	if (!strcmp("\x04", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_CTRL_d, normal_mode_command.count);
+
+	if (!strcmp("\x15", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_CTRL_u, normal_mode_command.count);
+
+	if (!strcmp("\x1b", normal_mode_command.command))
+		return add_user_command(read_index, write_index, UC_esc, normal_mode_command.count);
 
 	return false;
+}
+
+void handle_command_mode_command() {
+	if (!strcmp("q", command_mode_command.command) || !strcmp("quit", command_mode_command.command))
+		return s_exit_editor();
 }
 
 bool handle_user_input(char *input_buf, int *buffer_read_index, int *buffer_write_index) {
@@ -975,29 +1047,47 @@ bool handle_user_input(char *input_buf, int *buffer_read_index, int *buffer_writ
 		return false;
 
 	for (int i = 0; i < k; i++) {
-		switch (input_buf[i]) {
-			case '0':
-			case '1':
-			case '2':
-			case '3':
-			case '4':
-			case '5':
-			case '6':
-			case '7':
-			case '8':
-			case '9':
-				intermediate_command_add_count(input_buf[i] - '0');
-				break;
+		if (mode_type == MODE_NORMAL) {
+			switch (input_buf[i]) {
+				case '0':
+				case '1':
+				case '2':
+				case '3':
+				case '4':
+				case '5':
+				case '6':
+				case '7':
+				case '8':
+				case '9':
+					normal_mode_command_add_count(input_buf[i] - '0');
+					break;
 
-			default:
-				intermediate_command_add_char(input_buf[i]);
-				break;
+				default:
+					normal_mode_command_add_char(input_buf[i]);
+					break;
+			}
+
+			if (!normal_mode_command_is_valid())
+				normal_mode_command_clear();
+
+			handle_normal_mode_command(buffer_read_index, buffer_write_index);
+		} else if (mode_type == MODE_COMMAND) {
+			if (input_buf[i] == 10) { // Enter
+				if (command_mode_command_is_valid()) {
+					handle_command_mode_command();
+				} else {
+					char error_text[MAX_COMMAND_SIZE] = {0};
+					sprintf(error_text, "Not and editor command: %s", command_mode_command.command);
+
+					message_set(error_text);
+				}
+
+				command_mode_command_clear();
+				mode_set_type(MODE_NORMAL);
+			} else {
+				command_mode_add_char(input_buf[i]);
+			}
 		}
-
-		if (!intermediate_command_is_valid())
-			intermediate_command_clear();
-
-		handle_intermediate_command(buffer_read_index, buffer_write_index);
 	}
 
 	return true;
@@ -1025,14 +1115,14 @@ void editor_command_add_move_cursor(int* read_index, int* write_index, EditorMov
 	EditorCommandMoveCursorData data = {.direction = direction, .count = count};
 
 	editor_command_add(read_index, write_index, EC_MOVE_CURSOR, &data, sizeof(data));
-	intermediate_command_clear();
+	normal_mode_command_clear();
 }
 
 void editor_command_add_scroll(int* read_index, int* write_index, EditorScrollDirection direction, int count) {
 	EditorCommandScrollData data = {.direction = direction, .scroll = count};
 
 	editor_command_add(read_index, write_index, EC_SCROLL, &data, sizeof(data));
-	intermediate_command_clear();
+	normal_mode_command_clear();
 }
 
 void process_user_commands(
@@ -1040,7 +1130,7 @@ void process_user_commands(
 	int *user_write_index,
 	int *editor_read_index,
 	int *editor_write_index,
-	UserIntermediateCommand* command_modifier
+	NormalModeCommand* command_modifier
 ) {
 	while (*user_read_index != *user_write_index) {
 		UserCommand cmd = user_commands[*user_read_index];
@@ -1127,7 +1217,7 @@ void process_user_commands(
 			}
 
 			case UC_esc: {
-				intermediate_command_clear();
+				normal_mode_command_clear();
 				break;
 			}
 		}
@@ -1321,7 +1411,7 @@ int main(int argc, char * argv[]) {
 
 	s_configure_terminal();
 	atexit(s_restore_terminal);
-	signal(SIGINT, s_handle_sigint);
+	signal(SIGINT, s_exit_editor);
 
 	r_clear_screen();
 
@@ -1416,7 +1506,7 @@ int main(int argc, char * argv[]) {
 	highlight_line(initial_buffer_view, cursor_pos.y, cols);
 	draw_cursor(initial_buffer_view, cursor_pos.x, cursor_pos.y, cols);
 	draw_info_line(rows - INFO_LINE_HEIGHT, cols, buffer_status);
-	draw_message_line(rows - 1, cols, message_line_data);
+	draw_message_line(rows - 1, cols);
 	draw_status_column(status_column_view, rows, cols, total_rows, y_offset);
 	draw_debug_information(debug_info_view, cols, debug_info);
 
@@ -1432,7 +1522,7 @@ int main(int argc, char * argv[]) {
 			&user_command_write_index,
 			&editor_command_read_index,
 			&editor_command_write_index,
-			&user_intermediate_command
+			&normal_mode_command
 		);
 
 		process_editor_commands(
@@ -1454,7 +1544,7 @@ int main(int argc, char * argv[]) {
 		highlight_line(initial_buffer_view, cursor_pos.y, cols);
 		draw_cursor(initial_buffer_view, cursor_pos.x, cursor_pos.y, cols);
 		draw_info_line(rows - INFO_LINE_HEIGHT, cols, buffer_status);
-		draw_message_line(rows - 1, cols, message_line_data);
+		draw_message_line(rows - 1, cols);
 		draw_status_column(status_column_view, rows, cols, total_rows, y_offset);
 		draw_debug_information(debug_info_view, cols, debug_info);
 
