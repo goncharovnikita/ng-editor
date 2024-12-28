@@ -38,7 +38,8 @@ typedef enum {
 } Color;
 
 typedef enum {
-	EC_NAVIGATE,
+	EC_MOVE_CURSOR,
+	EC_SCROLL,
 } EditorCommandType;
 
 typedef enum {
@@ -86,6 +87,10 @@ typedef struct {
 } BufferStatus;
 
 typedef struct {
+	int scroll;
+} EditorConfig;
+
+typedef struct {
 	UserCommandType type;
 } UserCommand;
 
@@ -111,16 +116,23 @@ typedef enum {
 	ED_CURSOR_TO_NEXT_WORD,
 	ED_CURSOR_TO_END_OF_WORD,
 	ED_CURSOR_TO_PREV_WORD,
-	ED_SCROLL_HALF_DOWN,
-	ED_SCROLL_HALF_UP,
-	ED_GOTO_LINE,
-	ED_SCROLL_TOP,
-} EditorDirection;
+	ED_CURSOR_TO_LINE,
+} EditorMoveCursorDirection;
 
 typedef struct {
-	EditorDirection direction;
+	EditorMoveCursorDirection direction;
 	int count;
-} EditorCommandMoveData;
+} EditorCommandMoveCursorData;
+
+typedef enum {
+	ED_SCROLL_DOWN,
+	ED_SCROLL_UP,
+} EditorScrollDirection;
+
+typedef struct {
+	EditorScrollDirection direction;
+	int scroll;
+} EditorCommandScrollData;
 
 typedef struct {
 	EditorCommandType type;
@@ -156,11 +168,17 @@ int source_file_items_count = 0;
 UserCommand user_commands[MAX_COMMANDS_BUFFER_SIZE] = {};
 EditorCommand editor_commands[MAX_COMMANDS_BUFFER_SIZE] = {};
 
+EditorConfig editor_config = {.scroll = 1};
+
 UserCommandModifier user_command_modifier = {.count = 0};
 MessageLineData message_line_data = {
 	.message = "",
 	.user_command_modifier = &user_command_modifier
 };
+
+void editor_config_set_scroll(int scroll) {
+	editor_config.scroll = scroll;
+}
 
 int get_grid_index(int x, int y, int cols) {
 	return (y * cols) + x;
@@ -958,10 +976,17 @@ void editor_command_add(
 	*write_index = *write_index + 1;
 }
 
-void editor_command_add_navigate(int* read_index, int* write_index, EditorDirection direction, UserCommandModifier* command_modifier) {
-	EditorCommandMoveData data = {.direction = direction, .count = command_modifier->count};
+void editor_command_add_move_cursor(int* read_index, int* write_index, EditorMoveCursorDirection direction, UserCommandModifier* command_modifier) {
+	EditorCommandMoveCursorData data = {.direction = direction, .count = command_modifier->count};
 
-	editor_command_add(read_index, write_index, EC_NAVIGATE, &data, sizeof(data));
+	editor_command_add(read_index, write_index, EC_MOVE_CURSOR, &data, sizeof(data));
+	command_modifier_clear(command_modifier);
+}
+
+void editor_command_add_scroll(int* read_index, int* write_index, EditorScrollDirection direction, UserCommandModifier* command_modifier) {
+	EditorCommandScrollData data = {.direction = direction, .scroll = command_modifier->count};
+
+	editor_command_add(read_index, write_index, EC_SCROLL, &data, sizeof(data));
 	command_modifier_clear(command_modifier);
 }
 
@@ -975,77 +1000,77 @@ void process_user_commands(
 	while (*user_read_index != *user_write_index) {
 		switch (user_commands[*user_read_index].type) {
 			case UC_h: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_CURSOR_LEFT, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_LEFT, command_modifier);
 				break;
 			}
 
 			case UC_j: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_CURSOR_DOWN, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_DOWN, command_modifier);
 				break;
 			}
 
 			case UC_k: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_CURSOR_UP, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_UP, command_modifier);
 				break;
 			}
 
 			case UC_l: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_CURSOR_RIGHT, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_RIGHT, command_modifier);
 				break;
 			}
 
 			case UC_caret: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_CURSOR_TO_START_OF_LINE, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_START_OF_LINE, command_modifier);
 				break;
 			}
 
 			case UC_dollar: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_CURSOR_TO_END_OF_LINE, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_END_OF_LINE, command_modifier);
 				break;
 			}
 
 			case UC_w: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_CURSOR_TO_NEXT_WORD, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_NEXT_WORD, command_modifier);
 				break;
 			}
 
 			case UC_b: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_CURSOR_TO_PREV_WORD, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_PREV_WORD, command_modifier);
 				break;
 			}
 
 			case UC_e: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_CURSOR_TO_END_OF_WORD, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_END_OF_WORD, command_modifier);
 				break;
 			}
 
 			case UC_H: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_CURSOR_TOP, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TOP, command_modifier);
 				break;
 			}
 
 			case UC_M: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_CURSOR_MID, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_MID, command_modifier);
 				break;
 			}
 
 			case UC_L: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_CURSOR_BOTTOM, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_BOTTOM, command_modifier);
 				break;
 			}
 
 			case UC_G: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_GOTO_LINE, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_LINE, command_modifier);
 				break;
 			}
 
 			case UC_CTRL_d: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_SCROLL_HALF_DOWN, command_modifier);
+				editor_command_add_scroll(editor_read_index, editor_write_index, ED_SCROLL_DOWN, command_modifier);
 				break;
 			}
 
 			case UC_CTRL_u: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_SCROLL_HALF_UP, command_modifier);
+				editor_command_add_scroll(editor_read_index, editor_write_index, ED_SCROLL_UP, command_modifier);
 				break;
 			}
 
@@ -1072,9 +1097,9 @@ void process_editor_commands(
 ) {
 	while (*editor_read_index != *editor_write_index) {
 		switch (editor_commands[*editor_read_index].type) {
-			case EC_NAVIGATE: {
-				EditorCommandMoveData data;
-				memcpy(&data, &editor_commands[*editor_read_index].data, sizeof(EditorCommandMoveData));
+			case EC_MOVE_CURSOR: {
+				EditorCommandMoveCursorData data;
+				memcpy(&data, &editor_commands[*editor_read_index].data, sizeof(EditorCommandMoveCursorData));
 
 				int move_count = MAX(1, data.count);
 
@@ -1173,28 +1198,7 @@ void process_editor_commands(
 						break;
 					}
 
-					case ED_SCROLL_HALF_DOWN: {
-						nav_down(&cursor_line, &cursor_line_item, cursor_pos, rows / 2);
-						offset_down(y_offset, cursor_pos, rows, total_rows, rows / 2);
-
-						break;
-					}
-
-					case ED_SCROLL_HALF_UP: {
-						nav_up(&cursor_line, &cursor_line_item, cursor_pos, rows / 2);
-						offset_up(y_offset, cursor_pos, rows, rows / 2);
-
-						break;
-					}
-
-					case ED_SCROLL_TOP: {
-						nav_up(&cursor_line, &cursor_line_item, cursor_pos, *y_offset + cursor_pos->y);
-						offset_up(y_offset, cursor_pos, rows, *y_offset + cursor_pos->y);
-
-						break;
-					}
-
-					case ED_GOTO_LINE: {
+					case ED_CURSOR_TO_LINE: {
 						int current_row = *y_offset + cursor_pos->y;
 						int lines_offset = data.count - current_row - 1;
 
@@ -1213,8 +1217,34 @@ void process_editor_commands(
 				break;
 			}
 
-			default:
-				break;
+			case EC_SCROLL: {
+				EditorCommandScrollData data;
+				memcpy(&data, &editor_commands[*editor_read_index].data, sizeof(EditorCommandScrollData));
+
+				int move_count = MAX(1, data.scroll);
+
+				if (data.scroll > 0)
+					editor_config_set_scroll(data.scroll);
+
+				int scroll = editor_config.scroll;
+
+				switch (data.direction) {
+					case ED_SCROLL_DOWN: {
+						nav_down(&cursor_line, &cursor_line_item, cursor_pos, scroll);
+						offset_down(y_offset, cursor_pos, rows, total_rows, scroll);
+
+						break;
+					}
+
+					case ED_SCROLL_UP: {
+						nav_up(&cursor_line, &cursor_line_item, cursor_pos, scroll);
+						offset_up(y_offset, cursor_pos, rows, scroll);
+
+						break;
+					}
+				}
+			}
+
 		}
 
 		*editor_read_index = *editor_read_index + 1;
@@ -1314,6 +1344,8 @@ int main(int argc, char * argv[]) {
 		.cursor_head = &cursor_line_item,
 		.cursor_line = &cursor_line,
 	};
+
+	editor_config_set_scroll(rows / 2);
 
 	draw_source_file(initial_buffer_view, cols, y_offset, x_offset);
 	highlight_line(initial_buffer_view, cursor_pos.y, cols);
