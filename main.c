@@ -14,6 +14,7 @@
 #define MAX(a,b) (((a)>(b))?(a):(b))
 #define MAX_GRID_SIZE 65535
 #define MAX_COMMANDS_BUFFER_SIZE 1
+#define MAX_COMMAND_SIZE 4096
 #define STATUS_COLUMN_WIDTH 5
 #define INFO_LINE_HEIGHT 2
 
@@ -55,6 +56,7 @@ typedef enum {
 	UC_H,
 	UC_M,
 	UC_L,
+	UC_gg,
 	UC_G,
 	UC_CTRL_d,
 	UC_CTRL_u,
@@ -92,15 +94,17 @@ typedef struct {
 
 typedef struct {
 	UserCommandType type;
+	int count;
 } UserCommand;
 
 typedef struct {
 	int count;
-} UserCommandModifier;
+	char command[MAX_COMMAND_SIZE];
+} UserIntermediateCommand;
 
 typedef struct {
 	char *message;
-	UserCommandModifier* user_command_modifier;
+	UserIntermediateCommand* user_intermediate_command;
 } MessageLineData;
 
 typedef enum {
@@ -116,7 +120,8 @@ typedef enum {
 	ED_CURSOR_TO_NEXT_WORD,
 	ED_CURSOR_TO_END_OF_WORD,
 	ED_CURSOR_TO_PREV_WORD,
-	ED_CURSOR_TO_LINE,
+	ED_CURSOR_TO_FIRST_LINE,
+	ED_CURSOR_TO_LAST_LINE,
 } EditorMoveCursorDirection;
 
 typedef struct {
@@ -158,6 +163,20 @@ const char conf_non_word_symbols[] = {
 	'\t',
 };
 
+const char* conf_valid_commands[] = {
+	"",
+	"h", "j", "k", "l",
+	"^", "$",
+	"H", "M", "L",
+	"w", "e", "b",
+	"G", "g", "gg",
+	"\x04", // CTRL-d
+	"\x15", // CTRL-u
+	"\x1b", // CTRL-[
+
+	"-1",
+};
+
 Grid rendered_grid = {};
 Grid current_grid = {};
 LineT* source_file_first_line;
@@ -170,10 +189,10 @@ EditorCommand editor_commands[MAX_COMMANDS_BUFFER_SIZE] = {};
 
 EditorConfig editor_config = {.scroll = 1};
 
-UserCommandModifier user_command_modifier = {.count = 0};
+UserIntermediateCommand user_intermediate_command = {.count = 0, .command = ""};
 MessageLineData message_line_data = {
 	.message = "",
-	.user_command_modifier = &user_command_modifier
+	.user_intermediate_command = &user_intermediate_command
 };
 
 void editor_config_set_scroll(int scroll) {
@@ -467,11 +486,15 @@ void draw_message_line(int y, int cols, MessageLineData data) {
 		current_grid[get_grid_index(i, y, cols)].symbol = data.message[i];
 	}
 
-	char user_modifier_text[256];
+	char user_modifier_text[256] = {0};
 
-	if (data.user_command_modifier->count > 0)
-		sprintf(user_modifier_text, "%d", data.user_command_modifier->count);
-	else
+	if (data.user_intermediate_command->count > 0)
+		sprintf(user_modifier_text, "%d", data.user_intermediate_command->count);
+
+	if (strlen(data.user_intermediate_command->command) > 0)
+		sprintf(user_modifier_text, "%s%s", user_modifier_text, data.user_intermediate_command->command);
+
+	if (strlen(user_modifier_text) == 0)
 		sprintf(user_modifier_text, " ");
 
 	int line_and_column_text_len = strlen(user_modifier_text);
@@ -847,23 +870,102 @@ void offset_sync_with_cursor(int* y_offset, Pos* cursor_pos, int rows, int total
 	}
 }
 
-void add_user_command(int *read_index, int *write_index, UserCommandType type) {
+void intermediate_command_clear() {
+	user_intermediate_command.count = 0;
+
+	sprintf(user_intermediate_command.command, "");
+}
+
+void intermediate_command_add_count(int count) {
+	user_intermediate_command.count = user_intermediate_command.count * 10 + count;
+}
+
+bool intermediate_command_is_valid() {
+	int i = 0;
+
+	while (strcmp("-1", conf_valid_commands[i])) {
+		if (!strcmp(conf_valid_commands[i], user_intermediate_command.command))
+			return true;
+
+		i++;
+	}
+
+	return false;
+}
+
+void intermediate_command_add_char(char cmd_char) {
+	sprintf(user_intermediate_command.command, "%s%c", user_intermediate_command.command, cmd_char);
+}
+
+bool add_user_command(int *read_index, int *write_index, UserCommandType type, int count) {
 	if (*write_index >= MAX_COMMANDS_BUFFER_SIZE) {
 		*write_index = 0;
 		*read_index = 0;
 	}
 
 	user_commands[*write_index].type = type;
+	user_commands[*write_index].count = count;
 
 	*write_index = *write_index + 1;
+
+	intermediate_command_clear();
+
+	return true;
 }
 
-void command_modifier_clear(UserCommandModifier* command_modifier) {
-	command_modifier->count = 0;
-}
+bool handle_intermediate_command(int* read_index, int* write_index) {
+	if (!strcmp("h", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_h, user_intermediate_command.count);
 
-void command_modifier_add_count(UserCommandModifier* command_modifier, int count) {
-	command_modifier->count = command_modifier->count * 10 + count;
+	if (!strcmp("j", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_j, user_intermediate_command.count);
+
+	if (!strcmp("k", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_k, user_intermediate_command.count);
+
+	if (!strcmp("l", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_l, user_intermediate_command.count);
+
+	if (!strcmp("^", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_caret, user_intermediate_command.count);
+
+	if (!strcmp("$", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_dollar, user_intermediate_command.count);
+
+	if (!strcmp("w", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_w, user_intermediate_command.count);
+
+	if (!strcmp("e", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_e, user_intermediate_command.count);
+
+	if (!strcmp("b", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_b, user_intermediate_command.count);
+
+	if (!strcmp("H", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_H, user_intermediate_command.count);
+
+	if (!strcmp("M", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_M, user_intermediate_command.count);
+
+	if (!strcmp("L", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_L, user_intermediate_command.count);
+
+	if (!strcmp("gg", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_gg, user_intermediate_command.count);
+
+	if (!strcmp("G", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_G, user_intermediate_command.count);
+
+	if (!strcmp("\x04", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_CTRL_d, user_intermediate_command.count);
+
+	if (!strcmp("\x15", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_CTRL_u, user_intermediate_command.count);
+
+	if (!strcmp("\x1b", user_intermediate_command.command))
+		return add_user_command(read_index, write_index, UC_esc, user_intermediate_command.count);
+
+	return false;
 }
 
 bool handle_user_input(char *input_buf, int *buffer_read_index, int *buffer_write_index) {
@@ -874,70 +976,6 @@ bool handle_user_input(char *input_buf, int *buffer_read_index, int *buffer_writ
 
 	for (int i = 0; i < k; i++) {
 		switch (input_buf[i]) {
-			case 'h':
-				add_user_command(buffer_read_index, buffer_write_index, UC_h);
-				break;
-
-			case 'j':
-				add_user_command(buffer_read_index, buffer_write_index, UC_j);
-				break;
-
-			case 'k':
-				add_user_command(buffer_read_index, buffer_write_index, UC_k);
-				break;
-
-			case 'l':
-				add_user_command(buffer_read_index, buffer_write_index, UC_l);
-				break;
-
-			case '^':
-				add_user_command(buffer_read_index, buffer_write_index, UC_caret);
-				break;
-
-			case '$':
-				add_user_command(buffer_read_index, buffer_write_index, UC_dollar);
-				break;
-
-			case 'w':
-				add_user_command(buffer_read_index, buffer_write_index, UC_w);
-				break;
-
-			case 'e':
-				add_user_command(buffer_read_index, buffer_write_index, UC_e);
-				break;
-
-			case 'b':
-				add_user_command(buffer_read_index, buffer_write_index, UC_b);
-				break;
-
-			case 'M':
-				add_user_command(buffer_read_index, buffer_write_index, UC_M);
-				break;
-
-			case 'H':
-				add_user_command(buffer_read_index, buffer_write_index, UC_H);
-				break;
-
-			case 'L':
-				add_user_command(buffer_read_index, buffer_write_index, UC_L);
-				break;
-
-			case 'G':
-				add_user_command(buffer_read_index, buffer_write_index, UC_G);
-				break;
-
-			case 4:
-				add_user_command(buffer_read_index, buffer_write_index, UC_CTRL_d);
-				break;
-
-			case 21:
-				add_user_command(buffer_read_index, buffer_write_index, UC_CTRL_u);
-				break;
-
-			case 27:
-				add_user_command(buffer_read_index, buffer_write_index, UC_esc);
-				break;
-
 			case '0':
 			case '1':
 			case '2':
@@ -948,11 +986,18 @@ bool handle_user_input(char *input_buf, int *buffer_read_index, int *buffer_writ
 			case '7':
 			case '8':
 			case '9':
-				command_modifier_add_count(&user_command_modifier, input_buf[i] - '0');
+				intermediate_command_add_count(input_buf[i] - '0');
+				break;
 
 			default:
+				intermediate_command_add_char(input_buf[i]);
 				break;
 		}
+
+		if (!intermediate_command_is_valid())
+			intermediate_command_clear();
+
+		handle_intermediate_command(buffer_read_index, buffer_write_index);
 	}
 
 	return true;
@@ -976,18 +1021,18 @@ void editor_command_add(
 	*write_index = *write_index + 1;
 }
 
-void editor_command_add_move_cursor(int* read_index, int* write_index, EditorMoveCursorDirection direction, UserCommandModifier* command_modifier) {
-	EditorCommandMoveCursorData data = {.direction = direction, .count = command_modifier->count};
+void editor_command_add_move_cursor(int* read_index, int* write_index, EditorMoveCursorDirection direction, int count) {
+	EditorCommandMoveCursorData data = {.direction = direction, .count = count};
 
 	editor_command_add(read_index, write_index, EC_MOVE_CURSOR, &data, sizeof(data));
-	command_modifier_clear(command_modifier);
+	intermediate_command_clear();
 }
 
-void editor_command_add_scroll(int* read_index, int* write_index, EditorScrollDirection direction, UserCommandModifier* command_modifier) {
-	EditorCommandScrollData data = {.direction = direction, .scroll = command_modifier->count};
+void editor_command_add_scroll(int* read_index, int* write_index, EditorScrollDirection direction, int count) {
+	EditorCommandScrollData data = {.direction = direction, .scroll = count};
 
 	editor_command_add(read_index, write_index, EC_SCROLL, &data, sizeof(data));
-	command_modifier_clear(command_modifier);
+	intermediate_command_clear();
 }
 
 void process_user_commands(
@@ -995,87 +1040,94 @@ void process_user_commands(
 	int *user_write_index,
 	int *editor_read_index,
 	int *editor_write_index,
-	UserCommandModifier* command_modifier
+	UserIntermediateCommand* command_modifier
 ) {
 	while (*user_read_index != *user_write_index) {
-		switch (user_commands[*user_read_index].type) {
+		UserCommand cmd = user_commands[*user_read_index];
+
+		switch (cmd.type) {
 			case UC_h: {
-				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_LEFT, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_LEFT, cmd.count);
 				break;
 			}
 
 			case UC_j: {
-				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_DOWN, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_DOWN, cmd.count);
 				break;
 			}
 
 			case UC_k: {
-				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_UP, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_UP, cmd.count);
 				break;
 			}
 
 			case UC_l: {
-				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_RIGHT, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_RIGHT, cmd.count);
 				break;
 			}
 
 			case UC_caret: {
-				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_START_OF_LINE, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_START_OF_LINE, cmd.count);
 				break;
 			}
 
 			case UC_dollar: {
-				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_END_OF_LINE, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_END_OF_LINE, cmd.count);
 				break;
 			}
 
 			case UC_w: {
-				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_NEXT_WORD, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_NEXT_WORD, cmd.count);
 				break;
 			}
 
 			case UC_b: {
-				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_PREV_WORD, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_PREV_WORD, cmd.count);
 				break;
 			}
 
 			case UC_e: {
-				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_END_OF_WORD, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_END_OF_WORD, cmd.count);
 				break;
 			}
 
 			case UC_H: {
-				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TOP, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TOP, cmd.count);
 				break;
 			}
 
 			case UC_M: {
-				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_MID, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_MID, cmd.count);
 				break;
 			}
 
 			case UC_L: {
-				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_BOTTOM, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_BOTTOM, cmd.count);
+				break;
+			}
+
+			case UC_gg: {
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_FIRST_LINE, cmd.count);
 				break;
 			}
 
 			case UC_G: {
-				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_LINE, command_modifier);
+				editor_command_add_move_cursor(editor_read_index, editor_write_index, ED_CURSOR_TO_LAST_LINE, cmd.count);
 				break;
 			}
 
 			case UC_CTRL_d: {
-				editor_command_add_scroll(editor_read_index, editor_write_index, ED_SCROLL_DOWN, command_modifier);
+				editor_command_add_scroll(editor_read_index, editor_write_index, ED_SCROLL_DOWN, cmd.count);
 				break;
 			}
 
 			case UC_CTRL_u: {
-				editor_command_add_scroll(editor_read_index, editor_write_index, ED_SCROLL_UP, command_modifier);
+				editor_command_add_scroll(editor_read_index, editor_write_index, ED_SCROLL_UP, cmd.count);
 				break;
 			}
 
 			case UC_esc: {
-				command_modifier_clear(command_modifier);
+				intermediate_command_clear();
 				break;
 			}
 		}
@@ -1198,7 +1250,20 @@ void process_editor_commands(
 						break;
 					}
 
-					case ED_CURSOR_TO_LINE: {
+					case ED_CURSOR_TO_FIRST_LINE: {
+						int current_row = *y_offset + cursor_pos->y;
+						int lines_offset = data.count - current_row - 1;
+
+						if (data.count == 0) {
+							nav_vertical(&cursor_line, &cursor_line_item, cursor_pos, current_row * -1);
+						} else {
+							nav_vertical(&cursor_line, &cursor_line_item, cursor_pos, lines_offset);
+						}
+
+						break;
+					}
+
+					case ED_CURSOR_TO_LAST_LINE: {
 						int current_row = *y_offset + cursor_pos->y;
 						int lines_offset = data.count - current_row - 1;
 
@@ -1367,7 +1432,7 @@ int main(int argc, char * argv[]) {
 			&user_command_write_index,
 			&editor_command_read_index,
 			&editor_command_write_index,
-			&user_command_modifier
+			&user_intermediate_command
 		);
 
 		process_editor_commands(
