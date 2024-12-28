@@ -551,11 +551,11 @@ int nav_move_count_by_source_symbol(char source_symbol) {
 	return 1;
 }
 
-int nav_oneline_count(int (*cmd)(LineItemT** cursor_node, Pos* cursor_pos), LineItemT** cursor_node, Pos* cursor_pos, int count) {
+int nav_oneline_count(int (*cmd)(LineItemT**, Pos*), LineItemT** line_item, Pos* cursor_pos, int count) {
 	int move_distance = 0;
 
 	for (int i = 0; i < count; i++) {
-		move_distance += cmd(cursor_node, cursor_pos);
+		move_distance += cmd(line_item, cursor_pos);
 	}
 
 	return move_distance;
@@ -566,6 +566,34 @@ int nav_multiline_count(int (*cmd)(LineT**, LineItemT**, Pos*), LineT** line, Li
 
 	for (int i = 0; i < count; i++) {
 		move_distance += cmd(line, line_item, cursor_pos);
+	}
+
+	return move_distance;
+}
+
+int nav_oneline_distance(int (*cmd)(LineItemT** cursor_node, Pos* cursor_pos), LineItemT** cursor_node, Pos* cursor_pos, int count) {
+	int move_distance = 0;
+
+	while (move_distance < count) {
+		int diff = cmd(cursor_node, cursor_pos);
+		if (!diff)
+			break;
+
+		move_distance += diff;
+	}
+
+	return move_distance;
+}
+
+int nav_multiline_distance(int (*cmd)(LineT**, LineItemT**, Pos*), LineT** line, LineItemT** line_item, Pos* cursor_pos, int count) {
+	int move_distance = 0;
+
+	while (move_distance < count) {
+		int diff = cmd(line, line_item, cursor_pos);
+		if (!diff)
+			break;
+
+		move_distance += diff;
 	}
 
 	return move_distance;
@@ -601,7 +629,7 @@ int nav_backward(LineItemT** cursor_node, Pos* cursor_pos) {
 	return shift;
 }
 
-int nav_move_cursor_to_next_line(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos) {
+int nav_to_next_line(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos) {
 	LineT* new_cursor_line = *cursor_line;
 	LineItemT* new_cursor_line_item = *cursor_line_item;
 
@@ -620,7 +648,7 @@ int nav_move_cursor_to_next_line(LineT** cursor_line, LineItemT** cursor_line_it
 	return 1;
 }
 
-int nav_move_cursor_to_prev_line(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos) {
+int nav_to_prev_line(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos) {
 	LineT* new_cursor_line = *cursor_line;
 	LineItemT* new_cursor_line_item = *cursor_line_item;
 
@@ -654,19 +682,19 @@ int nav_to_end_of_line(LineItemT** cursor_line_item, Pos* cursor_pos) {
 }
 
 int nav_to_start_of_line(LineItemT** cursor_line_item, Pos* cursor_pos) {
-	return nav_oneline_count(nav_backward, cursor_line_item, cursor_pos, cursor_pos->x);
+	return nav_oneline_distance(nav_backward, cursor_line_item, cursor_pos, cursor_pos->x);
 }
 
 bool nav_forward_or_next_line(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos) {
 	if (!nav_forward(cursor_line_item, cursor_pos))
-		return nav_move_cursor_to_next_line(cursor_line, cursor_line_item, cursor_pos);
+		return nav_to_next_line(cursor_line, cursor_line_item, cursor_pos);
 	else
 		return true;
 }
 
 bool nav_backward_or_prev_line(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos) {
 	if (!nav_backward(cursor_line_item, cursor_pos)) {
-		if (!nav_move_cursor_to_prev_line(cursor_line, cursor_line_item, cursor_pos))
+		if (!nav_to_prev_line(cursor_line, cursor_line_item, cursor_pos))
 			return false;
 
 		nav_to_end_of_line(cursor_line_item, cursor_pos);
@@ -676,23 +704,25 @@ bool nav_backward_or_prev_line(LineT** cursor_line, LineItemT** cursor_line_item
 }
 
 int nav_up(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos, int count) {
-	int move_distance = nav_multiline_count(nav_move_cursor_to_prev_line, cursor_line, cursor_line_item, cursor_pos, count);
+	int original_x = cursor_pos->x;
+	int move_distance = nav_multiline_distance(nav_to_prev_line, cursor_line, cursor_line_item, cursor_pos, count);
 
 	if (!move_distance)
 		return 0;
 
-	nav_oneline_count(nav_forward, cursor_line_item, cursor_pos, cursor_pos->x);
+	nav_oneline_distance(nav_forward, cursor_line_item, cursor_pos, original_x);
 
 	return move_distance;
 }
 
 int nav_down(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos, int count) {
-	int move_distance = nav_multiline_count(nav_move_cursor_to_next_line, cursor_line, cursor_line_item, cursor_pos, count);
+	int original_x = cursor_pos->x;
+	int move_distance = nav_multiline_distance(nav_to_next_line, cursor_line, cursor_line_item, cursor_pos, count);
 
 	if (!move_distance)
 		return 0;
 
-	nav_oneline_count(nav_forward, cursor_line_item, cursor_pos, cursor_pos->x);
+	nav_oneline_distance(nav_forward, cursor_line_item, cursor_pos, original_x);
 
 	return move_distance;
 }
@@ -709,91 +739,69 @@ bool nav_mid(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos,
 }
 
 bool nav_to_next_word(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos) {
-	LineT* new_cursor_line = *cursor_line;
 	LineItemT* new_cursor_line_item = *cursor_line_item;
-	Pos new_cursor_pos;
-	pos_copy(&new_cursor_pos, cursor_pos);
 
 	while (!nav_is_word_symbol(new_cursor_line_item->symbol)) {
-		if (!nav_forward_or_next_line(&new_cursor_line, &new_cursor_line_item, &new_cursor_pos)) {
+		if (!nav_forward_or_next_line(cursor_line, &new_cursor_line_item, cursor_pos)) {
 			return false;
 		}
 	}
 
-	pos_copy(cursor_pos, &new_cursor_pos);
-
 	*cursor_line_item = new_cursor_line_item;
-	*cursor_line = new_cursor_line;
 
 	return true;
 }
 
 bool nav_to_prev_word(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos) {
-	LineT* new_cursor_line = *cursor_line;
 	LineItemT* new_cursor_line_item = *cursor_line_item;
-	Pos new_cursor_pos;
-	pos_copy(&new_cursor_pos, cursor_pos);
 
 	while (!nav_is_word_symbol(new_cursor_line_item->symbol)) {
-		if (!nav_backward_or_prev_line(&new_cursor_line, &new_cursor_line_item, &new_cursor_pos)) {
+		if (!nav_backward_or_prev_line(cursor_line, &new_cursor_line_item, cursor_pos)) {
 			return false;
 		}
 	}
 
-	pos_copy(cursor_pos, &new_cursor_pos);
-
 	*cursor_line_item = new_cursor_line_item;
-	*cursor_line = new_cursor_line;
 
 	return true;
 }
 
-int nav_to_end_of_word(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos) {
-	LineT* new_cursor_line = *cursor_line;
+int nav_to_end_of_word(LineItemT** cursor_line_item, Pos* cursor_pos) {
 	LineItemT* new_cursor_line_item = *cursor_line_item;
-	Pos new_cursor_pos;
-	pos_copy(&new_cursor_pos, cursor_pos);
 
 	int move_distance = 0;
 
 	while (nav_is_word_symbol(new_cursor_line_item->symbol) &&
 			new_cursor_line_item->next != NULL &&
 			nav_is_word_symbol(new_cursor_line_item->next->symbol)) {
-		int diff = nav_forward(&new_cursor_line_item, &new_cursor_pos);
+		int diff = nav_forward(&new_cursor_line_item, cursor_pos);
 		if (!diff)
 			break;
 
 		move_distance += diff;
 	}
 
-	*cursor_line = new_cursor_line;
 	*cursor_line_item = new_cursor_line_item;
-	pos_copy(cursor_pos, &new_cursor_pos);
 
 	return move_distance;
 }
 
-int nav_to_start_of_word(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos) {
-	LineT* new_cursor_line = *cursor_line;
+int nav_to_start_of_word(LineItemT** cursor_line_item, Pos* cursor_pos) {
 	LineItemT* new_cursor_line_item = *cursor_line_item;
-	Pos new_cursor_pos;
-	pos_copy(&new_cursor_pos, cursor_pos);
 
 	int move_distance = 0;
 
 	while (nav_is_word_symbol(new_cursor_line_item->symbol) &&
 			new_cursor_line_item->prev != NULL &&
 			nav_is_word_symbol(new_cursor_line_item->prev->symbol)) {
-		int diff = nav_backward(&new_cursor_line_item, &new_cursor_pos);
+		int diff = nav_backward(&new_cursor_line_item, cursor_pos);
 		if (!diff)
 			break;
 
 		move_distance += diff;
 	}
 
-	*cursor_line = new_cursor_line;
 	*cursor_line_item = new_cursor_line_item;
-	pos_copy(cursor_pos, &new_cursor_pos);
 
 	return move_distance;
 }
@@ -1132,7 +1140,7 @@ void process_editor_commands(
 
 					case ED_CURSOR_TO_NEXT_WORD: {
 						for (int i = move_count; i > 0; i--) {
-							nav_to_end_of_word(&cursor_line, &cursor_line_item, cursor_pos);
+							nav_to_end_of_word(&cursor_line_item, cursor_pos);
 							nav_forward_or_next_line(&cursor_line, &cursor_line_item, cursor_pos);
 							nav_to_next_word(&cursor_line, &cursor_line_item, cursor_pos);
 						}
@@ -1142,12 +1150,12 @@ void process_editor_commands(
 
 					case ED_CURSOR_TO_END_OF_WORD: {
 						for (int i = move_count; i > 0; i--) {
-							if (nav_to_end_of_word(&cursor_line, &cursor_line_item, cursor_pos))
+							if (nav_to_end_of_word(&cursor_line_item, cursor_pos))
 								continue;
 
 							nav_forward_or_next_line(&cursor_line, &cursor_line_item, cursor_pos);
 							nav_to_next_word(&cursor_line, &cursor_line_item, cursor_pos);
-							nav_to_end_of_word(&cursor_line, &cursor_line_item, cursor_pos);
+							nav_to_end_of_word(&cursor_line_item, cursor_pos);
 						}
 
 						break;
@@ -1155,10 +1163,10 @@ void process_editor_commands(
 
 					case ED_CURSOR_TO_PREV_WORD: {
 						for (int i = move_count; i > 0; i--) {
-							nav_to_start_of_word(&cursor_line, &cursor_line_item, cursor_pos);
+							nav_to_start_of_word(&cursor_line_item, cursor_pos);
 							nav_backward_or_prev_line(&cursor_line, &cursor_line_item, cursor_pos);
 							nav_to_prev_word(&cursor_line, &cursor_line_item, cursor_pos);
-							nav_to_start_of_word(&cursor_line, &cursor_line_item, cursor_pos);
+							nav_to_start_of_word(&cursor_line_item, cursor_pos);
 						}
 
 						break;
