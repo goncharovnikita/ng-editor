@@ -113,7 +113,7 @@ typedef enum {
 	ED_CURSOR_TO_PREV_WORD,
 	ED_SCROLL_HALF_DOWN,
 	ED_SCROLL_HALF_UP,
-	ED_SCROLL_BOTTOM,
+	ED_GOTO_LINE,
 	ED_SCROLL_TOP,
 } EditorDirection;
 
@@ -727,15 +727,12 @@ int nav_down(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos,
 	return move_distance;
 }
 
-bool nav_mid(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos, int rows) {
-	int target_row = rows / 2;
-	int lines_count = target_row - cursor_pos->y;
-
-	if (lines_count > 0) {
-		return nav_down(cursor_line, cursor_line_item, cursor_pos, lines_count);
+bool nav_vertical(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos, int lines_offset) {
+	if (lines_offset > 0) {
+		return nav_down(cursor_line, cursor_line_item, cursor_pos, lines_offset);
 	}
 
-	return nav_up(cursor_line, cursor_line_item, cursor_pos, lines_count * -1);
+	return nav_up(cursor_line, cursor_line_item, cursor_pos, lines_offset * -1);
 }
 
 bool nav_to_next_word(LineT** cursor_line, LineItemT** cursor_line_item, Pos* cursor_pos) {
@@ -1038,7 +1035,7 @@ void process_user_commands(
 			}
 
 			case UC_G: {
-				editor_command_add_navigate(editor_read_index, editor_write_index, ED_SCROLL_BOTTOM, command_modifier);
+				editor_command_add_navigate(editor_read_index, editor_write_index, ED_GOTO_LINE, command_modifier);
 				break;
 			}
 
@@ -1119,7 +1116,6 @@ void process_editor_commands(
 						break;
 					}
 
-
 					case ED_CURSOR_TOP: {
 						nav_up(&cursor_line, &cursor_line_item, cursor_pos, cursor_pos->y);
 
@@ -1127,7 +1123,10 @@ void process_editor_commands(
 					}
 
 					case ED_CURSOR_MID: {
-						nav_mid(&cursor_line, &cursor_line_item, cursor_pos, rows);
+						int current_row = cursor_pos->y;
+						int lines_offset = (rows / 2) - current_row;
+
+						nav_vertical(&cursor_line, &cursor_line_item, cursor_pos, lines_offset);
 
 						break;
 					}
@@ -1163,7 +1162,9 @@ void process_editor_commands(
 
 					case ED_CURSOR_TO_PREV_WORD: {
 						for (int i = move_count; i > 0; i--) {
-							nav_to_start_of_word(&cursor_line_item, cursor_pos);
+							if (nav_to_start_of_word(&cursor_line_item, cursor_pos))
+								continue;
+
 							nav_backward_or_prev_line(&cursor_line, &cursor_line_item, cursor_pos);
 							nav_to_prev_word(&cursor_line, &cursor_line_item, cursor_pos);
 							nav_to_start_of_word(&cursor_line_item, cursor_pos);
@@ -1193,9 +1194,15 @@ void process_editor_commands(
 						break;
 					}
 
-					case ED_SCROLL_BOTTOM: {
-						nav_down(&cursor_line, &cursor_line_item, cursor_pos, total_rows);
-						offset_down(y_offset, cursor_pos, rows, total_rows, total_rows);
+					case ED_GOTO_LINE: {
+						int current_row = *y_offset + cursor_pos->y;
+						int lines_offset = data.count - current_row - 1;
+
+						if (data.count == 0) {
+							nav_vertical(&cursor_line, &cursor_line_item, cursor_pos, total_rows - current_row);
+						} else {
+							nav_vertical(&cursor_line, &cursor_line_item, cursor_pos, lines_offset);
+						}
 
 						break;
 					}
