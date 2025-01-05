@@ -495,6 +495,19 @@ void draw_info_line(int y, int cols, BufferStatus status) {
 		current_grid[get_grid_index(i, y, cols)].symbol = status.filename[i];
 	}
 
+	char mode_name[256] = {0};
+	sprintf(mode_name, "NORMAL");
+
+	if (mode_type == MODE_COMMAND)
+		sprintf(mode_name, "COMMAND");
+
+	if (mode_type == MODE_INSERT)
+		sprintf(mode_name, "INSERT");
+
+	for (int i = 0; i < strlen(mode_name); i++) {
+		current_grid[get_grid_index(i + 1 + strlen(status.filename), y, cols)].symbol = mode_name[i];
+	}
+
 	char line_and_column_text[256];
 
 	sprintf(line_and_column_text, "%d,%d", status.line, status.column);
@@ -1082,6 +1095,9 @@ bool handle_user_input(char *input_buf, int *buffer_read_index, int *buffer_writ
 					message_set(error_text);
 				}
 
+				command_mode_command_clear();
+				mode_set_type(MODE_NORMAL);
+			} else if (input_buf[i] == '\x1b') { // Ctrl-[
 				command_mode_command_clear();
 				mode_set_type(MODE_NORMAL);
 			} else {
