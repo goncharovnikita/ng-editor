@@ -180,14 +180,25 @@ typedef struct {
 } EditorCommand;
 
 typedef struct {
+	LineT* head_line;
+} EditorBuffer;
+
+typedef struct {
+	EditorBuffer* editor_buffer;
+	LineItemT* cursor_line_item;
+	LineT* cursor_line;
+	View source_view;
+	View status_column_view;
+	Pos cursor_pos;
+	int x_offset;
+	int y_offset;
+} EditorWindow;
+
+typedef struct {
 	int* rows;
 	int* cols;
 	int* total_rows;
-	int* x_offset;
-	int* y_offset;
-	Pos* cursor_pos;
-	LineItemT** cursor_head;
-	LineT** cursor_line;
+	EditorWindow* editor_window;
 } DebugInformation;
 
 bool exit_loop = false;
@@ -222,10 +233,8 @@ const char* conf_command_mode_valid_commands[] = {
 
 Grid rendered_grid = {};
 Grid current_grid = {};
-LineT* source_file_first_line;
-LineItemT* cursor_line_item;
-LineT* cursor_line;
-int source_file_items_count = 0;
+
+EditorWindow* current_editor_window;
 
 ModeType mode_type;
 
@@ -283,6 +292,14 @@ bool symbol_is_printable(char symbol) {
 	return symbol >= 32 && symbol < 127;
 }
 
+EditorWindow* editor_window_new() {
+	return (EditorWindow*)malloc(sizeof(EditorWindow));
+}
+
+EditorBuffer* editor_buffer_new() {
+	return (EditorBuffer*)malloc(sizeof(EditorBuffer));
+}
+
 LineItemT* line_item_new() {
 	return (LineItemT*)malloc(sizeof(LineItemT));
 }
@@ -291,13 +308,14 @@ bool line_item_is_newline(LineItemT* line_item) {
 	return symbol_is_newline(line_item->symbol);
 }
 
-LineItemT* line_item_next(LineItemT* line_item) {
-	return line_item->next;
+void line_item_next(LineItemT** line_item) {
+	LineItemT* line = *line_item;
+	*line_item = line->next;
 }
 
 void line_item_prev(LineItemT** line_item) {
-	LineItemT* li = *line_item;
-	li = li->prev;
+	LineItemT* line = *line_item;
+	*line_item = line->prev;
 }
 
 void line_item_concat(LineItemT* a, LineItemT* b) {
@@ -335,6 +353,33 @@ void line_item_remove_next(LineItemT* line_head) {
 
 LineT* line_new() {
 	return (LineT*)malloc(sizeof(LineT));
+}
+
+int line_count_from(LineT* line) {
+	int result = 0;
+
+	while (line != NULL) {
+		line = line->next;
+		result++;
+	}
+
+	return result;
+}
+
+LineT* line_find_top(LineT* line) {
+	while (line->prev != NULL)
+		line = line->prev;
+
+	return line;
+}
+
+LineItemT* line_find_next_symbol(LineT* line, char symbol) {
+	return line_item_find_next_symbol(line->item_head, symbol);
+}
+
+void line_set_head(LineT* line, LineItemT* new_head) {
+	line->item_head = new_head;
+	new_head->prev = NULL;
 }
 
 void line_new_before(LineT** line) {
@@ -509,7 +554,7 @@ void r_set_color(Color color) {
 	}
 }
 
-void r_draw_line(int x, int y, int cols, int max_len, char* text) {
+void r_draw_line(int x, int y, int cols, int max_len, char* text, Color color) {
 	int text_len = strlen(text);
 
 	for (int i = 0; i < max_len; i++) {
@@ -518,7 +563,7 @@ void r_draw_line(int x, int y, int cols, int max_len, char* text) {
 			symbol = text[i];
 
 		current_grid[get_grid_index(x + i, y, cols)].symbol = symbol;
-		current_grid[get_grid_index(x + i, y, cols)].color = WHITE;
+		current_grid[get_grid_index(x + i, y, cols)].color = color;
 	}
 }
 
@@ -555,7 +600,7 @@ void switch_grids() {
 	);
 }
 
-void read_source_file_into_list(char *file_name) {
+void read_source_file_into_editor_buffer(char *file_name, EditorBuffer* editor_buffer) {
 	int y = 0;
 	char line[256];
 	FILE *source_file = fopen(file_name, "r");
@@ -602,25 +647,25 @@ void read_source_file_into_list(char *file_name) {
 
 				continue;
 			}
-
-			source_file_items_count++;
 		}
 	}
 
-	source_file_first_line = head_line;
-	cursor_line_item = head_line_item;
-	cursor_line = head_line;
+	editor_buffer->head_line = head_line;
 
 	fclose(source_file);
 }
 
-void draw_source_file(View dest, int cols, int x_offset, int y_offset) {
+void draw_editor_window_source(EditorWindow* window, int cols) {
+	View dest = window->source_view;
+	int y_offset = window->y_offset;
+	LineT* cursor_line = window->cursor_line;
+
 	int view_cols = dest.end.x - dest.origin.x;
 	int view_rows = dest.end.y - dest.origin.y;
 
 	int source_file_skip_lines = y_offset;
 
-	LineT* source_file_line = source_file_first_line;
+	LineT* source_file_line = line_find_top(cursor_line);
 
 	while (source_file_skip_lines > 0) {
 		assert(source_file_line != NULL);
@@ -684,7 +729,39 @@ void draw_source_file(View dest, int cols, int x_offset, int y_offset) {
 	}
 }
 
-void draw_cursor(View dest, int x, int y, int cols) {
+void draw_editor_window_status_column(EditorWindow* window, int cols) {
+	View dest = window->status_column_view;
+	int y_offset = window->y_offset;
+	int total_rows = line_count_from(window->editor_buffer->head_line);
+
+	for (int y = dest.origin.y; y < dest.end.y; y++) {
+		char column_text[256] = {0};
+
+		if (y + y_offset + 1 <= total_rows) {
+			sprintf(column_text, "%d", y + y_offset + 1);
+		} else {
+			sprintf(column_text, "");
+		}
+
+		Color color = WHITE;
+
+		if (y == window->cursor_pos.y)
+			color = HIGHLIGHT;
+
+		r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, column_text, color);
+	}
+}
+
+void draw_editor_window(EditorWindow* window, int cols) {
+	draw_editor_window_source(window, cols);
+	draw_editor_window_status_column(window, cols);
+}
+
+void draw_cursor(EditorWindow* editor_window, int cols) {
+	View dest = editor_window->source_view;
+	int x = editor_window->cursor_pos.x;
+	int y = editor_window->cursor_pos.y;
+
 	current_grid[get_grid_index(x + (dest.origin.x), y + dest.origin.y, cols)].color = CURSOR;
 }
 
@@ -759,21 +836,13 @@ void draw_message_line(int y, int cols) {
 	}
 }
 
-void draw_status_column(View dest, int rows, int cols, int total_rows, int offset) {
-	for (int y = dest.origin.y; y < dest.end.y; y++) {
-		char column_text[256] = {0};
-
-		if (y + offset + 1 <= total_rows) {
-			sprintf(column_text, "%d", y + offset + 1);
-		} else {
-			sprintf(column_text, "");
-		}
-
-		r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, column_text);
-	}
-}
-
 void draw_debug_information(View dest, int cols, DebugInformation debug_info) {
+	int x_offset = debug_info.editor_window->x_offset;
+	int y_offset = debug_info.editor_window->y_offset;
+	Pos cursor_pos = debug_info.editor_window->cursor_pos;
+	LineT* cursor_line = debug_info.editor_window->cursor_line;
+	LineItemT* cursor_head = debug_info.editor_window->cursor_line_item;
+
 	for (int y = dest.origin.y; y < dest.end.y; y++) {
 		int lineno = y - dest.origin.y;
 		int grid_index = get_view_grid_index(dest, dest.origin.x, y, cols);
@@ -782,32 +851,32 @@ void draw_debug_information(View dest, int cols, DebugInformation debug_info) {
 
 		if (lineno == 0) {
 			sprintf(text, "rows: %d, cols: %d, total_rows: %d", *debug_info.rows, *debug_info.cols, *debug_info.total_rows);
-			r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, text);
+			r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, text, WHITE);
 		}
 
 		if (lineno == 1) {
-			sprintf(text, "x_offset: %d, y_offset: %d", *debug_info.x_offset, *debug_info.y_offset);
-			r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, text);
+			sprintf(text, "x_offset: %d, y_offset: %d", x_offset, y_offset);
+			r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, text, WHITE);
 		}
 
 		if (lineno == 2) {
-			sprintf(text, "cursor_pos_x: %d, cursor_pos_y: %d", debug_info.cursor_pos->x, debug_info.cursor_pos->y);
-			r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, text);
+			sprintf(text, "cursor_pos_x: %d, cursor_pos_y: %d", cursor_pos.x, cursor_pos.y);
+			r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, text, WHITE);
 		}
 
 		if (lineno == 3) {
-			LineItemT* ch = *debug_info.cursor_head;
+			LineItemT* ch = cursor_head;
 			char symbol[256] = {ch->symbol};
 			if (symbol_is_newline(symbol[0]))
 				strcpy(symbol, "<newline>");
 			if (symbol[0] == '\t')
 				strcpy(symbol, "<tab>");
 			sprintf(text, "cursor source item (symbol: %s, addr: %p)", symbol, ch);
-			r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, text);
+			r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, text, WHITE);
 		}
 
 		if (lineno == 4) {
-			LineT* line = *debug_info.cursor_line;
+			LineT* line = cursor_line;
 			LineItemT* ch = line->item_head;
 
 			char line_text[256] = {};
@@ -820,7 +889,7 @@ void draw_debug_information(View dest, int cols, DebugInformation debug_info) {
 			}
 
 			sprintf(text, "%s", line_text);
-			r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, text);
+			r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, text, WHITE);
 		}
 	}
 }
@@ -1166,7 +1235,7 @@ int insert_insert_symbol(LineT** line, LineItemT** line_item, char symbol) {
 	new_line_item->prev = current_line_item->prev;
 
 	if (current_line_item->prev != NULL)
-		cursor_line_item->prev->next = new_line_item;
+		current_line_item->prev->next = new_line_item;
 
 	current_line_item->prev = new_line_item;
 
@@ -1180,7 +1249,7 @@ int insert_delete_symbol(LineT** line, LineItemT** line_item) {
 	if (current_line_item->prev == NULL)
 		return 0;
 
-	int shift = nav_move_count_by_source_symbol(cursor_line_item->prev->symbol);
+	int shift = nav_move_count_by_source_symbol(current_line_item->prev->symbol);
 
 	if (current_line_item->prev->prev == NULL) {
 		free(current_line_item->prev);
@@ -1645,14 +1714,15 @@ void process_user_commands(
 void process_editor_commands(
 	int *editor_read_index,
 	int *editor_write_index,
-	Pos *cursor_pos,
-	View active_view,
+	EditorWindow* editor_window,
 	int rows,
 	int cols,
-	int total_rows,
-	int *x_offset,
-	int *y_offset
+	int total_rows
 ) {
+	LineT** cursor_line = &editor_window->cursor_line;
+	LineItemT** cursor_line_item = &editor_window->cursor_line_item;
+	Pos* cursor_pos = &editor_window->cursor_pos;
+
 	while (*editor_read_index != *editor_write_index) {
 		switch (editor_commands[*editor_read_index].type) {
 			case EC_MOVE_CURSOR: {
@@ -1663,44 +1733,44 @@ void process_editor_commands(
 
 				switch (data.direction) {
 					case ED_CURSOR_BACKWARD: {
-						nav_oneline_count(nav_backward, &cursor_line_item, cursor_pos, move_count);
+						nav_oneline_count(nav_backward, cursor_line_item, cursor_pos, move_count);
 
 						break;
 					}
 
 					case ED_CURSOR_FORWARD: {
-						nav_oneline_count(nav_forward, &cursor_line_item, cursor_pos, move_count);
+						nav_oneline_count(nav_forward, cursor_line_item, cursor_pos, move_count);
 
 						break;
 					}
 
 					case ED_CURSOR_DOWN: {
-						nav_down(&cursor_line, &cursor_line_item, cursor_pos, move_count);
+						nav_down(cursor_line, cursor_line_item, cursor_pos, move_count);
 
 						break;
 					}
 
 					case ED_CURSOR_UP: {
-						nav_up(&cursor_line, &cursor_line_item, cursor_pos, move_count);
+						nav_up(cursor_line, cursor_line_item, cursor_pos, move_count);
 
 						break;
 					}
 
 					case ED_CURSOR_TO_START_OF_LINE: {
-						nav_to_start_of_line(&cursor_line_item, cursor_pos);
+						nav_to_start_of_line(cursor_line_item, cursor_pos);
 
 						break;
 					}
 
 					case ED_CURSOR_TO_END_OF_LINE: {
-						nav_down(&cursor_line, &cursor_line_item, cursor_pos, move_count - 1);
-						nav_to_end_of_line(&cursor_line_item, cursor_pos);
+						nav_down(cursor_line, cursor_line_item, cursor_pos, move_count - 1);
+						nav_to_end_of_line(cursor_line_item, cursor_pos);
 
 						break;
 					}
 
 					case ED_CURSOR_TOP: {
-						nav_up(&cursor_line, &cursor_line_item, cursor_pos, cursor_pos->y);
+						nav_up(cursor_line, cursor_line_item, cursor_pos, cursor_pos->y);
 
 						break;
 					}
@@ -1709,22 +1779,22 @@ void process_editor_commands(
 						int current_row = cursor_pos->y;
 						int lines_offset = (rows / 2) - current_row;
 
-						nav_vertical(&cursor_line, &cursor_line_item, cursor_pos, lines_offset);
+						nav_vertical(cursor_line, cursor_line_item, cursor_pos, lines_offset);
 
 						break;
 					}
 
 					case ED_CURSOR_BOTTOM: {
-						nav_down(&cursor_line, &cursor_line_item, cursor_pos, rows - cursor_pos->y - 1);
+						nav_down(cursor_line, cursor_line_item, cursor_pos, rows - cursor_pos->y - 1);
 
 						break;
 					}
 
 					case ED_CURSOR_TO_NEXT_WORD: {
 						for (int i = move_count; i > 0; i--) {
-							nav_to_end_of_word(&cursor_line_item, cursor_pos);
-							nav_forward_or_next_line(&cursor_line, &cursor_line_item, cursor_pos);
-							nav_to_next_word(&cursor_line, &cursor_line_item, cursor_pos);
+							nav_to_end_of_word(cursor_line_item, cursor_pos);
+							nav_forward_or_next_line(cursor_line, cursor_line_item, cursor_pos);
+							nav_to_next_word(cursor_line, cursor_line_item, cursor_pos);
 						}
 
 						break;
@@ -1732,12 +1802,12 @@ void process_editor_commands(
 
 					case ED_CURSOR_TO_END_OF_WORD: {
 						for (int i = move_count; i > 0; i--) {
-							if (nav_to_end_of_word(&cursor_line_item, cursor_pos))
+							if (nav_to_end_of_word(cursor_line_item, cursor_pos))
 								continue;
 
-							nav_forward_or_next_line(&cursor_line, &cursor_line_item, cursor_pos);
-							nav_to_next_word(&cursor_line, &cursor_line_item, cursor_pos);
-							nav_to_end_of_word(&cursor_line_item, cursor_pos);
+							nav_forward_or_next_line(cursor_line, cursor_line_item, cursor_pos);
+							nav_to_next_word(cursor_line, cursor_line_item, cursor_pos);
+							nav_to_end_of_word(cursor_line_item, cursor_pos);
 						}
 
 						break;
@@ -1745,52 +1815,52 @@ void process_editor_commands(
 
 					case ED_CURSOR_TO_PREV_WORD: {
 						for (int i = move_count; i > 0; i--) {
-							if (nav_to_start_of_word(&cursor_line_item, cursor_pos))
+							if (nav_to_start_of_word(cursor_line_item, cursor_pos))
 								continue;
 
-							nav_backward_or_prev_line(&cursor_line, &cursor_line_item, cursor_pos);
-							nav_to_prev_word(&cursor_line, &cursor_line_item, cursor_pos);
-							nav_to_start_of_word(&cursor_line_item, cursor_pos);
+							nav_backward_or_prev_line(cursor_line, cursor_line_item, cursor_pos);
+							nav_to_prev_word(cursor_line, cursor_line_item, cursor_pos);
+							nav_to_start_of_word(cursor_line_item, cursor_pos);
 						}
 
 						break;
 					}
 
 					case ED_CURSOR_TO_FIRST_LINE: {
-						int current_row = *y_offset + cursor_pos->y;
+						int current_row = editor_window->y_offset + cursor_pos->y;
 						int lines_offset = data.count - current_row - 1;
 
 						if (data.count == 0) {
-							nav_vertical(&cursor_line, &cursor_line_item, cursor_pos, current_row * -1);
+							nav_vertical(cursor_line, cursor_line_item, cursor_pos, current_row * -1);
 						} else {
-							nav_vertical(&cursor_line, &cursor_line_item, cursor_pos, lines_offset);
+							nav_vertical(cursor_line, cursor_line_item, cursor_pos, lines_offset);
 						}
 
 						break;
 					}
 
 					case ED_CURSOR_TO_LAST_LINE: {
-						int current_row = *y_offset + cursor_pos->y;
+						int current_row = editor_window->y_offset + cursor_pos->y;
 						int lines_offset = data.count - current_row - 1;
 
 						if (data.count == 0) {
-							nav_vertical(&cursor_line, &cursor_line_item, cursor_pos, total_rows - current_row);
+							nav_vertical(cursor_line, cursor_line_item, cursor_pos, total_rows - current_row);
 						} else {
-							nav_vertical(&cursor_line, &cursor_line_item, cursor_pos, lines_offset);
+							nav_vertical(cursor_line, cursor_line_item, cursor_pos, lines_offset);
 						}
 
 						break;
 					}
 				}
 
-				offset_sync_with_cursor(y_offset, cursor_pos, rows, total_rows);
+				offset_sync_with_cursor(&editor_window->y_offset, cursor_pos, rows, total_rows);
 
 				break;
 			}
 
 			case EC_NORMALIZE_CURSOR: {
-				if (line_item_is_newline(cursor_line_item))
-					nav_backward(&cursor_line_item, cursor_pos);
+				if (line_item_is_newline(*cursor_line_item))
+					nav_backward(cursor_line_item, cursor_pos);
 
 				break;
 			}
@@ -1808,15 +1878,15 @@ void process_editor_commands(
 
 				switch (data.direction) {
 					case ED_SCROLL_DOWN: {
-						nav_down(&cursor_line, &cursor_line_item, cursor_pos, scroll);
-						offset_down(y_offset, cursor_pos, rows, total_rows, scroll);
+						nav_down(cursor_line, cursor_line_item, cursor_pos, scroll);
+						offset_down(&editor_window->y_offset, cursor_pos, rows, total_rows, scroll);
 
 						break;
 					}
 
 					case ED_SCROLL_UP: {
-						nav_up(&cursor_line, &cursor_line_item, cursor_pos, scroll);
-						offset_up(y_offset, cursor_pos, rows, scroll);
+						nav_up(cursor_line, cursor_line_item, cursor_pos, scroll);
+						offset_up(&editor_window->y_offset, cursor_pos, rows, scroll);
 
 						break;
 					}
@@ -1828,34 +1898,33 @@ void process_editor_commands(
 				memcpy(&data, &editor_commands[*editor_read_index].data, sizeof(EditorCommandInsertSymbolData));
 
 				if (symbol_is_backspace(data.symbol)) {
-					int shift = insert_delete_symbol(&cursor_line, &cursor_line_item);
+					int shift = insert_delete_symbol(cursor_line, cursor_line_item);
 					cursor_backward(cursor_pos, shift);
 
-					if (shift == 0 && cursor_line->prev != NULL) {
-						if (line_item_is_newline(cursor_line->prev->item_head)) {
-							line_delete_before(cursor_line);
+					if (shift == 0 && editor_window->cursor_line->prev != NULL) {
+						if (line_item_is_newline(editor_window->cursor_line->prev->item_head)) {
+							line_delete_before(*cursor_line);
 							cursor_up(cursor_pos, 1);
 						} else {
-							nav_up(&cursor_line, &cursor_line_item, cursor_pos, 1);
-							nav_to_end_of_line(&cursor_line_item, cursor_pos);
-							nav_backward(&cursor_line_item, cursor_pos);
-							line_concat_after(cursor_line);
+							nav_up(cursor_line, cursor_line_item, cursor_pos, 1);
+							nav_to_end_of_line(cursor_line_item, cursor_pos);
+							nav_backward(cursor_line_item, cursor_pos);
+							line_concat_after(*cursor_line);
 							cursor_forward(cursor_pos, 1);
-							cursor_line_item = line_item_next(cursor_line_item);
+							line_item_next(cursor_line_item);
 						}
 					}
 				} else if (symbol_is_enter(data.symbol)) {
-					LineT* current_line = cursor_line;
-					LineItemT* line_tail = cursor_line_item;
+					LineT* current_line = *cursor_line;
+					LineItemT* line_tail = *cursor_line_item;
 					LineItemT* new_end_of_current_line = line_tail->prev;
 
-					line_new_after(&cursor_line);
-					nav_down(&cursor_line, &cursor_line_item, cursor_pos, 1);
+					line_new_after(cursor_line);
+					nav_down(cursor_line, cursor_line_item, cursor_pos, 1);
 
-					LineItemT* new_line_terminator = cursor_line->item_head;
+					LineItemT* new_line_terminator = line_find_next_symbol(*cursor_line, '\n');
 
-					cursor_line->item_head = line_tail;
-					line_tail->prev = NULL;
+					line_set_head(*cursor_line, line_tail);
 
 					if (new_end_of_current_line != NULL) {
 						new_end_of_current_line->next = new_line_terminator;
@@ -1864,9 +1933,9 @@ void process_editor_commands(
 						current_line->item_head = new_line_terminator;
 					}
 
-					cursor_line_item = cursor_line->item_head;
+					*cursor_line_item = (*cursor_line)->item_head;
 				} else if (symbol_is_printable(data.symbol)) {
-					int shift = insert_insert_symbol(&cursor_line, &cursor_line_item, data.symbol);
+					int shift = insert_insert_symbol(cursor_line, cursor_line_item, data.symbol);
 					cursor_forward(cursor_pos, shift);
 				}
 			}
@@ -1898,9 +1967,6 @@ int main(int argc, char * argv[]) {
 		cols = 190;
 
 	int total_rows = 0;
-	int x_offset = 0;
-	int y_offset = 0;
-	Pos cursor_pos = { .x = 0, .y = 0 };
 
 	int user_command_read_index = 0;
 	int user_command_write_index = 0;
@@ -1921,16 +1987,20 @@ int main(int argc, char * argv[]) {
 	initial_buffer_view.end.x = cols;
 	initial_buffer_view.end.y = rows - INFO_LINE_HEIGHT;
 
-	View status_column_view = {
-		.origin = {
-			.x = 0,
-			.y = 0,
-		},
-		.end = {
-			.x = STATUS_COLUMN_WIDTH,
-			.y = rows - INFO_LINE_HEIGHT,
-		},
-	};
+	View status_column_view;
+	status_column_view.origin.x = 0;
+	status_column_view.origin.y = 0;
+	status_column_view.end.x = STATUS_COLUMN_WIDTH;
+	status_column_view.end.y = rows - INFO_LINE_HEIGHT;
+
+	current_editor_window = editor_window_new();
+	current_editor_window->editor_buffer = editor_buffer_new();
+	current_editor_window->source_view = initial_buffer_view;
+	current_editor_window->status_column_view = status_column_view; 
+	current_editor_window->cursor_pos.x = 0;
+	current_editor_window->cursor_pos.y = 0;
+	current_editor_window->x_offset = 0;
+	current_editor_window->y_offset = 0;
 
 	View debug_info_view = {
 		.origin = {
@@ -1944,40 +2014,38 @@ int main(int argc, char * argv[]) {
 	};
 
 	if (argc > 1) {
-		read_source_file_into_list(argv[1]);
-
-		FILE *source_file = fopen(argv[1], "r");
-
-		char line[256];
-
-		while (fgets(line, cols, source_file)) {
-			total_rows++;
-		}
-
-		fclose(source_file);
+		read_source_file_into_editor_buffer(argv[1], current_editor_window->editor_buffer);
 
 		buffer_status.filename = argv[1];
+	} else {
+		LineT* head_line = line_new();
+		LineItemT* head_line_item = line_item_new();
+
+		head_line->item_head = head_line_item;
+		head_line_item->symbol = '\n';
+
+		current_editor_window->editor_buffer->head_line = head_line;
 	}
+
+	current_editor_window->cursor_line = current_editor_window->editor_buffer->head_line;
+	current_editor_window->cursor_line_item = current_editor_window->editor_buffer->head_line->item_head;
+
+	total_rows = line_count_from(current_editor_window->editor_buffer->head_line);
 
 	DebugInformation debug_info = {
 		.cols = &cols,
 		.rows = &rows,
 		.total_rows = &total_rows,
-		.x_offset = &x_offset,
-		.y_offset = &y_offset,
-		.cursor_pos = &cursor_pos,
-		.cursor_head = &cursor_line_item,
-		.cursor_line = &cursor_line,
+		.editor_window = current_editor_window,
 	};
 
 	editor_config_set_scroll(rows / 2);
 
-	draw_source_file(initial_buffer_view, cols, y_offset, x_offset);
-	highlight_line(initial_buffer_view, cursor_pos.y, cols);
-	draw_cursor(initial_buffer_view, cursor_pos.x, cursor_pos.y, cols);
+	draw_editor_window(current_editor_window, cols);
+	highlight_line(initial_buffer_view, current_editor_window->cursor_pos.y, cols);
+	draw_cursor(current_editor_window, cols);
 	draw_info_line(rows - INFO_LINE_HEIGHT, cols, buffer_status);
 	draw_message_line(rows - 1, cols);
-	draw_status_column(status_column_view, rows, cols, total_rows, y_offset);
 	draw_debug_information(debug_info_view, cols, debug_info);
 
 	render(rows, cols);
@@ -1998,24 +2066,20 @@ int main(int argc, char * argv[]) {
 		process_editor_commands(
 			&editor_command_read_index,
 			&editor_command_write_index,
-			&cursor_pos,
-			initial_buffer_view,
+			current_editor_window,
 			initial_buffer_view.end.y - initial_buffer_view.origin.y,
 			initial_buffer_view.end.x - initial_buffer_view.origin.x,
-			total_rows,
-			&x_offset,
-			&y_offset
+			total_rows
 		);
 
-		buffer_status.column = cursor_pos.x;
-		buffer_status.line = cursor_pos.y;
+		buffer_status.column = current_editor_window->cursor_pos.x;
+		buffer_status.line = current_editor_window->cursor_pos.y;
 
-		draw_source_file(initial_buffer_view, cols, x_offset, y_offset);
-		highlight_line(initial_buffer_view, cursor_pos.y, cols);
-		draw_cursor(initial_buffer_view, cursor_pos.x, cursor_pos.y, cols);
+		draw_editor_window(current_editor_window, cols);
+		highlight_line(initial_buffer_view, current_editor_window->cursor_pos.y, cols);
+		draw_cursor(current_editor_window, cols);
 		draw_info_line(rows - INFO_LINE_HEIGHT, cols, buffer_status);
 		draw_message_line(rows - 1, cols);
-		draw_status_column(status_column_view, rows, cols, total_rows, y_offset);
 		draw_debug_information(debug_info_view, cols, debug_info);
 
 		render(rows, cols);
