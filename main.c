@@ -12,7 +12,7 @@
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
-#define MAX_GRID_SIZE 65535
+#define MAX_GRID_SIZE 1024
 #define MAX_COMMANDS_BUFFER_SIZE 2
 #define MAX_COMMAND_SIZE 4096
 #define MAX_MESSAGE_SIZE 1024
@@ -95,7 +95,7 @@ typedef struct Line {
 	struct Line* prev;
 } LineT;
 
-typedef Cell Grid[MAX_GRID_SIZE];
+typedef Cell Grid[MAX_GRID_SIZE][MAX_GRID_SIZE];
 
 typedef struct {
 	int scroll;
@@ -191,6 +191,7 @@ typedef struct {
 } EditorWindow;
 
 typedef struct EditorTabItem {
+	int tabno;
 	EditorWindow* window;
 	struct EditorTabItem* next;
 } EditorTabItemT;
@@ -264,14 +265,6 @@ void mode_set_type(ModeType mt) {
 
 void editor_config_set_scroll(int scroll) {
 	editor_config.scroll = scroll;
-}
-
-int get_grid_index(int x, int y, int cols) {
-	return (y * cols) + x;
-}
-
-int get_view_grid_index(View view, int x, int y, int cols) {
-	return get_grid_index(x + view.origin.x, y + view.origin.y, cols);
 }
 
 void message_set(char* message) {
@@ -568,7 +561,7 @@ void r_set_color(Color color) {
 	}
 }
 
-void r_draw_line(int x, int y, int cols, int max_len, char* text, Color color) {
+void r_draw_line(int x, int y, int max_len, char* text, Color color) {
 	int text_len = strlen(text);
 
 	for (int i = 0; i < max_len; i++) {
@@ -576,8 +569,8 @@ void r_draw_line(int x, int y, int cols, int max_len, char* text, Color color) {
 		if (i < text_len)
 			symbol = text[i];
 
-		current_grid[get_grid_index(x + i, y, cols)].symbol = symbol;
-		current_grid[get_grid_index(x + i, y, cols)].color = color;
+		current_grid[y][x + i].symbol = symbol;
+		current_grid[y][x + i].color = color;
 	}
 }
 
@@ -588,10 +581,8 @@ int b_read_input(void *buf) {
 void render(int rows, int cols) {
 	for (int y = 0; y < rows; y++) {
 		for (int x = 0; x < cols; x++) {
-			int index = get_grid_index(x, y, cols);
-
-			Cell old_cell = rendered_grid[index];
-			Cell new_cell = current_grid[index];
+			Cell old_cell = rendered_grid[y][x];
+			Cell new_cell = current_grid[y][x];
 
 			if (old_cell.symbol != new_cell.symbol || old_cell.color != new_cell.color) {
 				r_move_cursor(x, y);
@@ -669,13 +660,13 @@ LineT* read_and_parse_source_file(char *file_name) {
 	return head_line;
 }
 
-void draw_editor_window_source(EditorWindow* window, int cols) {
-	View dest = window->source_view;
+void draw_editor_window_source(EditorWindow* window) {
+	View view = window->source_view;
 	int y_offset = window->y_offset;
 	LineT* cursor_line = window->cursor_line;
 
-	int view_cols = dest.end.x - dest.origin.x;
-	int view_rows = dest.end.y - dest.origin.y;
+	int view_cols = view.end.x - view.origin.x;
+	int view_rows = view.end.y - view.origin.y;
 
 	int source_file_skip_lines = y_offset;
 
@@ -698,29 +689,25 @@ void draw_editor_window_source(EditorWindow* window, int cols) {
 		}
 
 		for (int x = 0; x < view_cols; x++) {
-			int grid_index = get_view_grid_index(dest, x, y, cols);
-
 			if (source_file_line_item == NULL)
 				line_ended = true;
 
 			if (line_ended) {
 				Cell cell = {.symbol = ' ', .color = CLEAR};
 
-				memcpy(&current_grid[grid_index], &cell, sizeof(Cell));
+				memcpy(&current_grid[view.origin.y + y][view.origin.x + x], &cell, sizeof(Cell));
 
 				continue;
 			}
 
 			if (source_file_line_item->symbol == '\t') {
 				for (int j = 0; j < 4 && x + j < view_cols; j++) {
-					grid_index = get_view_grid_index(dest, x + j, y, cols);
-
 					Cell cell = {.symbol = ' ', .color = CLEAR};
 
 					if (j == 0)
 						cell.symbol = '>';
 
-					memcpy(&current_grid[grid_index], &cell, sizeof(Cell));
+					memcpy(&current_grid[view.origin.y + y][view.origin.x + x + j], &cell, sizeof(Cell));
 				}
 
 				x += 3;
@@ -732,7 +719,7 @@ void draw_editor_window_source(EditorWindow* window, int cols) {
 				if (line_item_is_newline(source_file_line_item))
 					cell.symbol = '<';
 
-				memcpy(&current_grid[grid_index], &cell, sizeof(Cell));
+				memcpy(&current_grid[view.origin.y + y][view.origin.x + x], &cell, sizeof(Cell));
 
 				source_file_line_item = source_file_line_item->next;
 			}
@@ -743,7 +730,7 @@ void draw_editor_window_source(EditorWindow* window, int cols) {
 	}
 }
 
-void draw_editor_window_status_column(EditorWindow* window, int cols) {
+void draw_editor_window_status_column(EditorWindow* window) {
 	View dest = window->status_column_view;
 	int y_offset = window->y_offset;
 	int total_rows = line_count_from(window->editor_buffer->head_line);
@@ -762,11 +749,11 @@ void draw_editor_window_status_column(EditorWindow* window, int cols) {
 		if (y == window->cursor_pos.y)
 			color = HIGHLIGHT;
 
-		r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, column_text, color);
+		r_draw_line(dest.origin.x, y, dest.end.x - dest.origin.x, column_text, color);
 	}
 }
 
-void draw_editor_window_info_line(EditorWindow* window, int cols) {
+void draw_editor_window_info_line(EditorWindow* window) {
 	View view = window->info_line_view;
 	char* filename = window->editor_buffer->filename;
 	int line = window->cursor_pos.y + window->y_offset;
@@ -776,13 +763,13 @@ void draw_editor_window_info_line(EditorWindow* window, int cols) {
 
 	for (int y = 0; y < view_rows; y++) {
 		for (int x = 0; x < view_cols; x++) {
-			current_grid[get_view_grid_index(view, x, y, cols)].symbol = ' ';
-			current_grid[get_view_grid_index(view, x, y, cols)].color = INFO_LINE;
+			current_grid[view.origin.y + y][view.origin.x + x].symbol = ' ';
+			current_grid[view.origin.y + y][view.origin.x + x].color = INFO_LINE;
 		}
 	}
 
 	for (int x = 0; x < strlen(filename) && x < view_cols; x++) {
-		current_grid[get_view_grid_index(view, x, 0, cols)].symbol = filename[x];
+		current_grid[view.origin.y][view.origin.x + x].symbol = filename[x];
 	}
 
 	char mode_name[256] = {0};
@@ -795,7 +782,7 @@ void draw_editor_window_info_line(EditorWindow* window, int cols) {
 		sprintf(mode_name, "INSERT");
 
 	for (int x = 0; x < strlen(mode_name) && x < view_cols; x++) {
-		current_grid[get_view_grid_index(view, x + 1 + strlen(filename), 0, cols)].symbol = mode_name[x];
+		current_grid[view.origin.y][view.origin.x + x + 1 + strlen(filename)].symbol = mode_name[x];
 	}
 
 	char line_and_column_text[256];
@@ -805,42 +792,60 @@ void draw_editor_window_info_line(EditorWindow* window, int cols) {
 	int line_and_column_text_len = strlen(line_and_column_text);
 
 	for (int x = 0; x < strlen(line_and_column_text); x++) {
-		current_grid[get_view_grid_index(view, cols - x - 1, 0, cols)].symbol = line_and_column_text[line_and_column_text_len - 1 - x];
+		current_grid[view.origin.y][view.origin.x + view_cols - x - 1].symbol = line_and_column_text[line_and_column_text_len - 1 - x];
 	}
 }
 
-void draw_editor_window(EditorWindow* window, int cols) {
-	draw_editor_window_source(window, cols);
-	draw_editor_window_status_column(window, cols);
-	draw_editor_window_info_line(window, cols);
+void draw_cursor(EditorWindow* editor_window) {
+	View view = editor_window->source_view;
+	int x = editor_window->cursor_pos.x;
+	int y = editor_window->cursor_pos.y;
+
+	current_grid[view.origin.y + y][view.origin.x + x].color = CURSOR;
 }
 
-void draw_editor_tab(EditorTabT* editor_tab, int cols) {
+void highlight_line(EditorWindow* editor_window) {
+	int y = editor_window->cursor_pos.y;
+	View dest = editor_window->source_view;
+
+	for (int x = dest.origin.x; x < dest.end.x; x++) {
+		current_grid[y][x].color = HIGHLIGHT;
+	}
+}
+
+void draw_editor_window(EditorWindow* window) {
+	draw_editor_window_source(window);
+	draw_editor_window_status_column(window);
+	draw_editor_window_info_line(window);
+}
+
+void draw_editor_tab(EditorTabT* editor_tab) {
 	EditorTabItemT* editor_tab_item = editor_tab->tab_item_head;
 
 	while (editor_tab_item != NULL) {
-		draw_editor_window(editor_tab_item->window, cols);
+		draw_editor_window(editor_tab_item->window);
+
+		if (editor_tab_item->tabno == editor_tab->tab_item_current->tabno) {
+			highlight_line(editor_tab_item->window);
+			draw_cursor(editor_tab_item->window);
+		}
+
 		editor_tab_item = editor_tab_item->next;
 	}
 }
 
-void draw_cursor(EditorWindow* editor_window, int cols) {
-	View dest = editor_window->source_view;
-	int x = editor_window->cursor_pos.x;
-	int y = editor_window->cursor_pos.y;
+void draw_message_line(View view) {
+	int cols = view.end.x - view.origin.x;
+	int y = view.origin.y;
 
-	current_grid[get_grid_index(x + (dest.origin.x), y + dest.origin.y, cols)].color = CURSOR;
-}
-
-void draw_message_line(int y, int cols) {
 	for (int i = 0; i < cols; i++) {
-		current_grid[get_grid_index(i, y, cols)].symbol = ' ';
-		current_grid[get_grid_index(i, y, cols)].color = CLEAR;
+		current_grid[y][i].symbol = ' ';
+		current_grid[y][i].color = CLEAR;
 	}
 
 	if (mode_type == MODE_NORMAL) {
 		for (int i = 0; i < strlen(message_line_data.message); i++) {
-			current_grid[get_grid_index(i, y, cols)].symbol = message_line_data.message[i];
+			current_grid[y][i].symbol = message_line_data.message[i];
 		}
 
 		char user_modifier_text[256] = {0};
@@ -857,19 +862,19 @@ void draw_message_line(int y, int cols) {
 		int line_and_column_text_len = strlen(user_modifier_text);
 
 		for (int i = 0; i < strlen(user_modifier_text); i++) {
-			current_grid[get_grid_index(cols - i - 1, y, cols)].symbol = user_modifier_text[line_and_column_text_len - 1 - i];
+			current_grid[y][cols - i - 1].symbol = user_modifier_text[line_and_column_text_len - 1 - i];
 		}
 	} else if (mode_type == MODE_COMMAND) {
 		char command_text[MAX_COMMAND_SIZE] = {0};
 		sprintf(command_text, ":%s", command_mode_command.command);
 
 		for (int i = 0; i < strlen(command_text); i++) {
-			current_grid[get_grid_index(i, y, cols)].symbol = command_text[i];
+			current_grid[y][i].symbol = command_text[i];
 		}
 	}
 }
 
-void draw_debug_information(View dest, int cols, DebugInformation debug_info) {
+void draw_debug_information(View dest, DebugInformation debug_info) {
 	EditorTabItemT* editor_tab_item = current_editor_tab->tab_item_current;
 	EditorWindow* editor_window = editor_tab_item->window;
 	int x_offset = editor_window->x_offset;
@@ -881,23 +886,22 @@ void draw_debug_information(View dest, int cols, DebugInformation debug_info) {
 
 	for (int y = dest.origin.y; y < dest.end.y; y++) {
 		int lineno = y - dest.origin.y;
-		int grid_index = get_view_grid_index(dest, dest.origin.x, y, cols);
 
 		char text[4096];
 
 		if (lineno == 0) {
 			sprintf(text, "rows: %d, cols: %d, total_rows: %d", *debug_info.rows, *debug_info.cols, total_rows);
-			r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, text, WHITE);
+			r_draw_line(dest.origin.x, y, dest.end.x - dest.origin.x, text, WHITE);
 		}
 
 		if (lineno == 1) {
 			sprintf(text, "x_offset: %d, y_offset: %d", x_offset, y_offset);
-			r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, text, WHITE);
+			r_draw_line(dest.origin.x, y, dest.end.x - dest.origin.x, text, WHITE);
 		}
 
 		if (lineno == 2) {
 			sprintf(text, "cursor_pos_x: %d, cursor_pos_y: %d", cursor_pos.x, cursor_pos.y);
-			r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, text, WHITE);
+			r_draw_line(dest.origin.x, y, dest.end.x - dest.origin.x, text, WHITE);
 		}
 
 		if (lineno == 3) {
@@ -908,7 +912,7 @@ void draw_debug_information(View dest, int cols, DebugInformation debug_info) {
 			if (symbol[0] == '\t')
 				strcpy(symbol, "<tab>");
 			sprintf(text, "cursor source item (symbol: %s, addr: %p)", symbol, ch);
-			r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, text, WHITE);
+			r_draw_line(dest.origin.x, y, dest.end.x - dest.origin.x, text, WHITE);
 		}
 
 		if (lineno == 4) {
@@ -925,17 +929,8 @@ void draw_debug_information(View dest, int cols, DebugInformation debug_info) {
 			}
 
 			sprintf(text, "%s", line_text);
-			r_draw_line(dest.origin.x, y, cols, dest.end.x - dest.origin.x, text, WHITE);
+			r_draw_line(dest.origin.x, y, dest.end.x - dest.origin.x, text, WHITE);
 		}
-	}
-}
-
-void highlight_line(EditorWindow* editor_window, int cols) {
-	int y = editor_window->cursor_pos.y;
-	View dest = editor_window->source_view;
-
-	for (int x = dest.origin.x; x < dest.end.x; x++) {
-		current_grid[get_grid_index(x, y, cols)].color = HIGHLIGHT;
 	}
 }
 
@@ -2033,6 +2028,7 @@ EditorTabT* init_editor_tab(int argc, char* argv[], int cols, int rows) {
 	editor_window->y_offset = 0;
 
 	EditorTabItemT* editor_tab_item = editor_tab_item_new();
+	editor_tab_item->tabno = 1;
 	editor_tab_item->window = editor_window;
 
 	EditorTabT* editor_tab = editor_tab_new();
@@ -2073,17 +2069,17 @@ int main(int argc, char * argv[]) {
 
 	current_editor_tab = init_editor_tab(argc, argv, cols, rows);
 
-	View debug_info_view = {
-		.origin = {
-			.x = (cols / 3) * 2,
-			.y = 0,
-		},
-		.end = {
-			.x = cols - 1,
-			.y = (rows / 3) * 2,
-		},
-	};
+	View message_line_view;
+	message_line_view.origin.x = 0;
+	message_line_view.origin.y = rows - 1;
+	message_line_view.end.x = cols;
+	message_line_view.end.y = rows;
 
+	View debug_info_view;
+	debug_info_view.origin.x = (cols / 3) * 2;
+	debug_info_view.origin.y = 0;
+	debug_info_view.end.x = cols - 1;
+	debug_info_view.end.y = (rows / 3) * 2;
 
 	DebugInformation debug_info = {
 		.cols = &cols,
@@ -2092,11 +2088,9 @@ int main(int argc, char * argv[]) {
 
 	editor_config_set_scroll(rows / 2);
 
-	draw_editor_tab(current_editor_tab, cols);
-	highlight_line(current_editor_tab->tab_item_current->window, cols);
-	draw_cursor(current_editor_tab->tab_item_current->window, cols);
-	draw_message_line(rows - 1, cols);
-	draw_debug_information(debug_info_view, cols, debug_info);
+	draw_editor_tab(current_editor_tab);
+	draw_message_line(message_line_view);
+	draw_debug_information(debug_info_view, debug_info);
 
 	render(rows, cols);
 	switch_grids();
@@ -2119,11 +2113,9 @@ int main(int argc, char * argv[]) {
 			current_editor_tab->tab_item_current->window
 		);
 
-		draw_editor_tab(current_editor_tab, cols);
-		highlight_line(current_editor_tab->tab_item_current->window, cols);
-		draw_cursor(current_editor_tab->tab_item_current->window, cols);
-		draw_message_line(rows - 1, cols);
-		draw_debug_information(debug_info_view, cols, debug_info);
+		draw_editor_tab(current_editor_tab);
+		draw_message_line(message_line_view);
+		draw_debug_information(debug_info_view, debug_info);
 
 		render(rows, cols);
 		switch_grids();
