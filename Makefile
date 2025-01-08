@@ -1,5 +1,5 @@
 main: main.c
-	cc main.c -o ng-editor
+	cc view.c main.c -o ng-editor
 
 .PHONY: run
 run: main
