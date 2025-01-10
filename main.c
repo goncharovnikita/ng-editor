@@ -10,6 +10,7 @@
 #include <assert.h>
 #include <sys/ioctl.h>
 
+#include "line.c"
 #include "view.h"
 #include "calc.h"
 
@@ -79,18 +80,6 @@ typedef struct {
 	char symbol;
 	Color color;
 } Cell;
-
-typedef struct LineItem {
-	char symbol;
-	struct LineItem* next;
-	struct LineItem* prev;
-} LineItemT;
-
-typedef struct Line {
-	LineItemT* item_head;
-	struct Line* next;
-	struct Line* prev;
-} LineT;
 
 typedef Cell Grid[MAX_GRID_SIZE][MAX_GRID_SIZE];
 
@@ -389,192 +378,8 @@ EditorTabT* editor_tab_new() {
 	return (EditorTabT*)malloc(sizeof(EditorTabT));
 }
 
-LineItemT* line_item_new() {
-	return (LineItemT*)malloc(sizeof(LineItemT));
-}
-
 bool line_item_is_newline(LineItemT* line_item) {
 	return symbol_is_newline(line_item->symbol);
-}
-
-void line_item_next(LineItemT** line_item) {
-	LineItemT* line = *line_item;
-	*line_item = line->next;
-}
-
-void line_item_prev(LineItemT** line_item) {
-	LineItemT* line = *line_item;
-	*line_item = line->prev;
-}
-
-void line_item_concat(LineItemT* a, LineItemT* b) {
-	while (a->next != NULL)
-		a = a->next;
-
-	a->next = b;
-	b->prev = a;
-}
-
-LineItemT* line_item_find_next_symbol(LineItemT* line_head, char symbol) {
-	while (line_head != NULL && line_head->symbol != symbol)
-		line_head = line_head->next;
-
-	return line_head;
-}
-
-LineItemT* line_item_find_tail(LineItemT* line_head) {
-	while (line_head->next != NULL)
-		line_head = line_head->next;
-
-	return line_head;
-}
-
-void line_item_remove_next(LineItemT* line_head) {
-	LineItemT* tmp = line_head->next;
-	if (tmp == NULL)
-		return ;
-
-	line_head->next = line_head->next->next;
-	line_head->next->prev = line_head;
-
-	free(tmp);
-}
-
-LineT* line_new() {
-	return (LineT*)malloc(sizeof(LineT));
-}
-
-int line_count_from(LineT* line) {
-	int result = 0;
-
-	while (line != NULL) {
-		line = line->next;
-		result++;
-	}
-
-	return result;
-}
-
-LineT* line_find_top(LineT* line) {
-	while (line->prev != NULL)
-		line = line->prev;
-
-	return line;
-}
-
-LineItemT* line_find_next_symbol(LineT* line, char symbol) {
-	return line_item_find_next_symbol(line->item_head, symbol);
-}
-
-void line_set_head(LineT* line, LineItemT* new_head) {
-	line->item_head = new_head;
-	new_head->prev = NULL;
-}
-
-void line_new_before(LineT** line) {
-	LineT* l = *line;
-
-	LineT* new_line = line_new();
-	LineItemT* new_line_item = line_item_new();
-
-	new_line_item->symbol = '\n';
-	new_line->item_head = new_line_item;
-	new_line->prev = l->prev;
-
-	if (l->prev != NULL)
-		l->prev->next = new_line;
-
-	new_line->next = l;
-	l->prev = new_line;
-}
-
-void line_delete_after(LineT** line) {
-	LineT* l = *line;
-
-	if (l->next == NULL)
-		return;
-
-	LineT* line_to_free = l->next;
-
-	l->next = l->next->next;
-	if (l->next != NULL)
-		l->next->prev = l;
-
-	LineItemT* line_to_free_item = line_to_free->item_head;
-
-	while (line_to_free_item != NULL) {
-		LineItemT* tmp = line_to_free_item;
-		line_to_free_item = line_to_free_item->next;
-
-		free(tmp);
-	}
-
-	free(line_to_free);
-}
-
-void line_delete_before(LineT* line) {
-	if (line->prev == NULL)
-		return;
-
-	LineT* line_to_free = line->prev;
-
-	line->prev = line->prev->prev;
-	if (line->prev != NULL)
-		line->prev->next = line;
-
-	LineItemT* line_to_free_item = line_to_free->item_head;
-
-	while (line_to_free_item != NULL) {
-		LineItemT* tmp = line_to_free_item;
-		line_to_free_item = line_to_free_item->prev;
-
-		free(tmp);
-	}
-
-	free(line_to_free);
-}
-
-void line_concat_after(LineT* line) {
-	LineItemT* line_head = line->item_head;
-	LineItemT* line_tail = line_item_find_tail(line_head);
-
-	if (line->next == NULL)
-		return;
-
-	LineItemT* next_line_item = line->next->item_head;
-	line_tail->next = next_line_item;
-	next_line_item->prev = line_tail;
-	line->next->item_head = NULL;
-
-	LineItemT* newline_item = line_item_find_next_symbol(line_head, '\n');
-	if (newline_item->prev == NULL) {
-		line->item_head = newline_item->next;
-		newline_item->next->prev = NULL;
-	} else {
-		newline_item->prev->next = newline_item->next;
-		newline_item->next->prev = newline_item->prev;
-	}
-
-	free(newline_item);
-
-	line_delete_after(&line);
-}
-
-void line_new_after(LineT** line) {
-	LineT* l = *line;
-
-	LineT* new_line = line_new();
-	LineItemT* new_line_item = line_item_new();
-
-	new_line_item->symbol = '\n';
-	new_line->item_head = new_line_item;
-	new_line->next = l->next;
-
-	if (l->next != NULL)
-		l->next->prev = new_line;
-
-	new_line->prev = l;
-	l->next = new_line;
 }
 
 bool pos_is_equal(Pos a, Pos b) {
@@ -692,49 +497,21 @@ LineT* read_and_parse_source_file(char *file_name) {
 	char line[256];
 	FILE *source_file = fopen(file_name, "r");
 
-	LineT* head_line = line_new();
+	LineT* head_line = NULL;
 	LineT* current_line = head_line;
 	LineT* prev_line = NULL;
 
-	LineItemT* head_line_item = line_item_new();
-	LineItemT* current_line_item = head_line_item;
-	LineItemT* prev_line_item = NULL;
+	while (fgets(line, 256, source_file)) {
+		current_line = line_new_from_str(line);
+		if (head_line == NULL)
+			head_line = current_line;
 
-	head_line->item_head = head_line_item;
-
-	while (fgets(line, 100, source_file)) {
-		for (int i = 0; i < strlen(line); i++) {
-			assert(current_line != NULL);
-			assert(current_line_item != NULL);
-
-			current_line_item->symbol = line[i];
-
-			if (prev_line_item != NULL) {
-				prev_line_item->next = current_line_item;
-				current_line_item->prev = prev_line_item;
-			}
-
-			prev_line_item = current_line_item;
-
-			current_line_item = line_item_new();
-
-			if (symbol_is_newline(line[i])) {
-				if (prev_line != NULL) {
-					prev_line->next = current_line;
-					current_line->prev = prev_line;
-				}
-
-				current_line_item = line_item_new();
-
-				prev_line = current_line;
-				prev_line_item = NULL;
-
-				current_line = line_new();
-				current_line->item_head = current_line_item;
-
-				continue;
-			}
+		if (prev_line != NULL) {
+			prev_line->next = current_line;
+			current_line->prev = prev_line;
 		}
+
+		prev_line = current_line;
 	}
 
 	fclose(source_file);
@@ -2174,11 +1951,9 @@ EditorTabItemT* init_editor_tab_item(
 			editor_buffer->head_line = read_and_parse_source_file(filename);
 			editor_buffer->filename = filename;
 		} else {
-			LineItemT* head_line_item = line_item_new();
-			head_line_item->symbol = '\n';
+			LineItemT* head_line_item = line_item_new('\n');
 
-			editor_buffer->head_line = line_new();
-			editor_buffer->head_line->item_head = head_line_item;
+			editor_buffer->head_line = line_new(head_line_item);
 			editor_buffer->filename = "";
 		}
 	}
