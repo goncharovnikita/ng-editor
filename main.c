@@ -11,15 +11,15 @@
 #include <sys/ioctl.h>
 
 #include "view.h"
+#include "calc.h"
 
-#define MIN(a,b) (((a)<(b))?(a):(b))
-#define MAX(a,b) (((a)>(b))?(a):(b))
 #define MAX_GRID_SIZE 1024
 #define MAX_COMMANDS_BUFFER_SIZE 2
 #define MAX_COMMAND_SIZE 4096
 #define MAX_MESSAGE_SIZE 1024
 #define STATUS_COLUMN_WIDTH 5
-#define INFO_LINE_HEIGHT 2
+#define INFO_LINE_HEIGHT 1
+#define COMMAND_LINE_HEIGHT 1
 
 static struct termios old_termios, new_termios;
 
@@ -42,6 +42,7 @@ typedef enum {
 	EC_NORMALIZE_CURSOR,
 	EC_SCROLL,
 	EC_INSERT,
+	EC_SWITCH_WINDOW,
 } EditorCommandType;
 
 typedef enum {
@@ -68,6 +69,10 @@ typedef enum {
 	UC_a,
 	UC_A,
 	UC_insert_symbol,
+	UC_CTRL_w_l,
+	UC_CTRL_w_h,
+	UC_CTRL_w_j,
+	UC_CTRL_w_k,
 } UserCommandType;
 
 typedef struct {
@@ -140,10 +145,22 @@ typedef enum {
 	ED_CURSOR_TO_LAST_LINE,
 } EditorMoveCursorDirection;
 
+typedef enum {
+	ED_SWITCH_WINDOW_RIGHT,
+	ED_SWITCH_WINDOW_LEFT,
+	ED_SWITCH_WINDOW_UP,
+	ED_SWITCH_WINDOW_DOWN,
+} EditorSwitchWindowDirection;
+
 typedef struct {
 	EditorMoveCursorDirection direction;
 	int count;
 } EditorCommandMoveCursorData;
+
+typedef struct {
+	EditorSwitchWindowDirection direction;
+	int count;
+} EditorCommandSwitchWindowData;
 
 typedef struct {
 	char symbol;
@@ -165,13 +182,14 @@ typedef struct {
 	char data[256];
 } EditorCommand;
 
-typedef struct {
+typedef struct EditorBuffer {
 	LineT* head_line;
 	char* filename;
-} EditorBuffer;
+	struct EditorBuffer* next;
+} EditorBufferT;
 
 typedef struct {
-	EditorBuffer* editor_buffer;
+	EditorBufferT* editor_buffer;
 	LineItemT* cursor_line_item;
 	LineT* cursor_line;
 	ViewT* source_view;
@@ -185,7 +203,11 @@ typedef struct {
 typedef struct EditorTabItem {
 	int tabno;
 	EditorWindow* window;
-	struct EditorTabItem* next;
+
+	struct EditorTabItem* right;
+	struct EditorTabItem* left;
+	struct EditorTabItem* down;
+	struct EditorTabItem* up;
 } EditorTabItemT;
 
 typedef struct EditorTab {
@@ -214,12 +236,16 @@ const char* conf_normal_mode_valid_commands[] = {
 	"^", "$",
 	"H", "M", "L",
 	"w", "e", "b",
-	"G", "g", "gg",
+	"G", "gg",
 	"\x04", // CTRL-d
 	"\x15", // CTRL-u
 	"\x1b", // CTRL-[
 	":",
 	"i", "a", "I", "A",
+	"\x17\x6c", // CTRL-w-l
+	"\x17\x68", // CTRL-w-h
+	"\x17\x6a", // CTRL-w-j
+	"\x17\x6b", // CTRL-w-k
 
 	"-1",
 };
@@ -233,7 +259,9 @@ const char* conf_command_mode_valid_commands[] = {
 Grid rendered_grid = {};
 Grid current_grid = {};
 
+EditorBufferT* buffers;
 EditorTabT* current_editor_tab;
+int64_t tabno_counter = 0;
 
 ModeType mode_type;
 
@@ -283,8 +311,70 @@ bool symbol_is_printable(char symbol) {
 	return symbol >= 32 && symbol < 127;
 }
 
-EditorBuffer* editor_buffer_new() {
-	return (EditorBuffer*)malloc(sizeof(EditorBuffer));
+char* symbol_to_printable(char symbol) {
+	char* printable = (char*)malloc(64 * sizeof(char));
+
+	if (symbol_is_printable(symbol)) {
+		sprintf(printable, "%c", symbol);
+
+		return printable;
+	}
+
+	switch (symbol) {
+		case '\x17':
+			sprintf(printable, "^C");
+			break;
+
+		default:
+			sprintf(printable, "<non-printable>");
+			break;
+	}
+
+	return printable;
+}
+
+char* string_to_printable(char* str) {
+	char* printable = (char*)malloc(sizeof(char) * strlen(str) * strlen("<non-printable>") + 1);
+
+	for (int i = 0; i < strlen(str); i++) {
+		char* p = symbol_to_printable(str[i]);
+
+		sprintf(printable, "%s%s", printable, p);
+
+		free(p);
+	}
+
+	return printable;
+}
+
+EditorBufferT* editor_buffer_new() {
+	EditorBufferT* buffer = (EditorBufferT*)malloc(sizeof(EditorBufferT));
+
+	if (buffers == NULL) {
+		buffers = buffer;
+	} else {
+		EditorBufferT* buffers_tail = buffers;
+
+		while (buffers_tail->next != NULL)
+			buffers_tail = buffers_tail->next;
+
+		buffers_tail->next = buffer;
+	}
+
+	return buffer;
+}
+
+EditorBufferT* editor_buffer_find_by_filename(char* filename) {
+	if (buffers == NULL)
+		return NULL;
+
+	EditorBufferT* editor_buffer = buffers;
+
+	while (strcmp(filename, editor_buffer->filename)) {
+		editor_buffer = editor_buffer->next;
+	}
+
+	return editor_buffer;
 }
 
 EditorWindow* editor_window_new() {
@@ -662,7 +752,7 @@ void draw_editor_window_source(EditorWindow* window) {
 
 	int source_file_skip_lines = y_offset;
 
-	LineT* source_file_line = line_find_top(cursor_line);
+	LineT* source_file_line = window->editor_buffer->head_line;
 
 	while (source_file_skip_lines > 0) {
 		assert(source_file_line != NULL);
@@ -726,8 +816,10 @@ void draw_editor_window_status_column(EditorWindow* window) {
 	ViewT* view = window->status_column_view;
 	int y_offset = window->y_offset;
 	int total_rows = line_count_from(window->editor_buffer->head_line);
+	int view_rows_count = view_rows(view);
+	int view_cols_count = view_cols(view);
 
-	for (int y = view->origin.y; y < view->end.y; y++) {
+	for (int y = 0; y < view_rows_count; y++) {
 		char column_text[256] = {0};
 
 		if (y + y_offset + 1 <= total_rows) {
@@ -741,7 +833,7 @@ void draw_editor_window_status_column(EditorWindow* window) {
 		if (y == window->cursor_pos.y)
 			color = HIGHLIGHT;
 
-		r_draw_line(view->origin.x, y, view_cols(view), column_text, color);
+		r_draw_line(view_x(view, 0), view_y(view, y), view_cols_count, column_text, color);
 	}
 }
 
@@ -761,20 +853,7 @@ void draw_editor_window_info_line(EditorWindow* window) {
 	}
 
 	for (int x = 0; x < strlen(filename) && x < view_cols_count; x++) {
-		current_grid[view->origin.y][view_x(view, x)].symbol = filename[x];
-	}
-
-	char mode_name[256] = {0};
-	sprintf(mode_name, "NORMAL");
-
-	if (mode_type == MODE_COMMAND)
-		sprintf(mode_name, "COMMAND");
-
-	if (mode_type == MODE_INSERT)
-		sprintf(mode_name, "INSERT");
-
-	for (int x = 0; x < strlen(mode_name) && x < view_cols_count; x++) {
-		current_grid[view->origin.y][view_x(view, x + 1 + strlen(filename))].symbol = mode_name[x];
+		current_grid[view_y(view, 0)][view_x(view, x)].symbol = filename[x];
 	}
 
 	char line_and_column_text[256];
@@ -784,7 +863,7 @@ void draw_editor_window_info_line(EditorWindow* window) {
 	int line_and_column_text_len = strlen(line_and_column_text);
 
 	for (int x = 0; x < strlen(line_and_column_text); x++) {
-		current_grid[view->origin.y][view_x(view, view_cols_count - x - 1)].symbol = line_and_column_text[line_and_column_text_len - 1 - x];
+		current_grid[view_y(view, 0)][view_x(view, view_cols_count - x - 2)].symbol = line_and_column_text[line_and_column_text_len - 1 - x];
 	}
 }
 
@@ -799,9 +878,10 @@ void draw_cursor(EditorWindow* editor_window) {
 void highlight_line(EditorWindow* editor_window) {
 	int y = editor_window->cursor_pos.y;
 	ViewT* view = editor_window->source_view;
+	int view_cols_count = view_cols(view);
 
-	for (int x = view->origin.x; x < view->end.x; x++) {
-		current_grid[y][x].color = HIGHLIGHT;
+	for (int x = 0; x < view_cols_count; x++) {
+		current_grid[view_y(view, y)][view_x(view, x)].color = HIGHLIGHT;
 	}
 }
 
@@ -811,22 +891,26 @@ void draw_editor_window(EditorWindow* window) {
 	draw_editor_window_info_line(window);
 }
 
-void draw_editor_tab(EditorTabT* editor_tab) {
-	EditorTabItemT* editor_tab_item = editor_tab->tab_item_head;
+void draw_editor_tab_item(EditorTabT* editor_tab, EditorTabItemT* editor_tab_item) {
+	if (editor_tab_item == NULL)
+		return;
 
-	while (editor_tab_item != NULL) {
-		draw_editor_window(editor_tab_item->window);
+	draw_editor_window(editor_tab_item->window);
 
-		if (editor_tab_item->tabno == editor_tab->tab_item_current->tabno) {
-			highlight_line(editor_tab_item->window);
-			draw_cursor(editor_tab_item->window);
-		}
-
-		editor_tab_item = editor_tab_item->next;
+	if (editor_tab_item->tabno == editor_tab->tab_item_current->tabno) {
+		highlight_line(editor_tab_item->window);
+		draw_cursor(editor_tab_item->window);
 	}
+
+	draw_editor_tab_item(editor_tab, editor_tab_item->right);
+	draw_editor_tab_item(editor_tab, editor_tab_item->down);
 }
 
-void draw_message_line(ViewT* view) {
+void draw_editor_tab(EditorTabT* editor_tab) {
+	draw_editor_tab_item(editor_tab, editor_tab->tab_item_head);
+}
+
+void draw_command_line(ViewT* view) {
 	int cols = view_cols(view);
 	int y = view_y(view, 0);
 
@@ -845,8 +929,12 @@ void draw_message_line(ViewT* view) {
 		if (normal_mode_command.count > 0)
 			sprintf(user_modifier_text, "%d", normal_mode_command.count);
 
-		if (strlen(normal_mode_command.command) > 0)
-			sprintf(user_modifier_text, "%s%s", user_modifier_text, normal_mode_command.command);
+		if (strlen(normal_mode_command.command) > 0) {
+			char* printable_cmd = string_to_printable(normal_mode_command.command);
+			sprintf(user_modifier_text, "%s%s", user_modifier_text, printable_cmd);
+
+			free(printable_cmd);
+		}
 
 		if (strlen(user_modifier_text) == 0)
 			sprintf(user_modifier_text, " ");
@@ -862,6 +950,12 @@ void draw_message_line(ViewT* view) {
 
 		for (int i = 0; i < strlen(command_text); i++) {
 			current_grid[y][i].symbol = command_text[i];
+		}
+	} else if (mode_type == MODE_INSERT) {
+		char* mode_name = "-- INSERT --";
+
+		for (int i = 0; i < strlen(mode_name); i++) {
+			current_grid[y][i].symbol = mode_name[i];
 		}
 	}
 }
@@ -915,14 +1009,14 @@ void draw_debug_information(ViewT* view, DebugInformation debug_info) {
 			char line_text[256] = {};
 
 			int i = 0;
-			while (ch != NULL && symbol_is_newline(ch->symbol)) {
+			while (ch != NULL) {
 				line_text[i] = ch->symbol;
 				ch = ch->next;
 				i++;
 			}
 
-			sprintf(text, "%s", line_text);
-			r_draw_line(view->origin.x, y, view_cols_count, text, WHITE);
+			sprintf(text, "current line %s", line_text);
+			r_draw_line(view_x(view, 0), y, view_cols_count, text, WHITE);
 		}
 	}
 }
@@ -1245,9 +1339,7 @@ void offset_sync_with_cursor(int* y_offset, Pos* cursor_pos, int rows, int total
 	}
 }
 
-int insert_insert_symbol(LineT** line, LineItemT** line_item, char symbol) {
-	LineT* current_line = *line;
-	LineItemT* current_line_item = *line_item;
+int insert_insert_symbol(LineT* current_line, LineItemT* current_line_item, char symbol) {
 	int shift = nav_move_count_by_source_symbol(symbol);
 
 	LineItemT* new_line_item = (LineItemT*)malloc(sizeof(LineItemT));
@@ -1304,11 +1396,24 @@ void normal_mode_command_add_count(int count) {
 	normal_mode_command.count = normal_mode_command.count * 10 + count;
 }
 
-bool normal_mode_command_is_valid() {
+bool normal_mode_command_is_valid_partial() {
 	int i = 0;
 
 	while (strcmp("-1", conf_normal_mode_valid_commands[i])) {
-		if (!strcmp(conf_normal_mode_valid_commands[i], normal_mode_command.command))
+		if (!strncmp(normal_mode_command.command, conf_normal_mode_valid_commands[i], strlen(normal_mode_command.command)))
+			return true;
+
+		i++;
+	}
+
+	return false;
+}
+
+bool normal_mode_command_is_valid_full() {
+	int i = 0;
+
+	while (strcmp("-1", conf_normal_mode_valid_commands[i])) {
+		if (!strcmp(normal_mode_command.command, conf_normal_mode_valid_commands[i]))
 			return true;
 
 		i++;
@@ -1468,6 +1573,18 @@ bool handle_normal_mode_command(int* read_index, int* write_index) {
 	if (!strcmp("\x1b", normal_mode_command.command))
 		return add_user_command_with_no_data(read_index, write_index, UC_esc, normal_mode_command.count);
 
+	if (!strcmp("\x17\x6c", normal_mode_command.command))
+		return add_user_command_with_no_data(read_index, write_index, UC_CTRL_w_l, normal_mode_command.count);
+
+	if (!strcmp("\x17\x68", normal_mode_command.command))
+		return add_user_command_with_no_data(read_index, write_index, UC_CTRL_w_h, normal_mode_command.count);
+
+	if (!strcmp("\x17\x6a", normal_mode_command.command))
+		return add_user_command_with_no_data(read_index, write_index, UC_CTRL_w_j, normal_mode_command.count);
+
+	if (!strcmp("\x17\x6b", normal_mode_command.command))
+		return add_user_command_with_no_data(read_index, write_index, UC_CTRL_w_k, normal_mode_command.count);
+
 	return false;
 }
 
@@ -1518,10 +1635,13 @@ bool handle_user_input(char *input_buf, int *buffer_read_index, int *buffer_writ
 					break;
 			}
 
-			if (!normal_mode_command_is_valid())
+			if (!normal_mode_command_is_valid_partial())
 				normal_mode_command_clear();
 
-			handle_normal_mode_command(buffer_read_index, buffer_write_index);
+			if (normal_mode_command_is_valid_full()) {
+				handle_normal_mode_command(buffer_read_index, buffer_write_index);
+				normal_mode_command_clear();
+			}
 		} else if (mode_type == MODE_COMMAND) {
 			if (symbol_is_enter(input_buf[i])) {
 				if (command_mode_command_is_valid()) {
@@ -1572,27 +1692,28 @@ void editor_command_add_move_cursor(int* read_index, int* write_index, EditorMov
 	EditorCommandMoveCursorData data = {.direction = direction, .count = count};
 
 	editor_command_add(read_index, write_index, EC_MOVE_CURSOR, &data, sizeof(data));
-	normal_mode_command_clear();
 }
 
+void editor_command_add_switch_window(int* read_index, int* write_index, EditorSwitchWindowDirection direction, int count) {
+	EditorCommandSwitchWindowData data = {.direction = direction, .count = count};
+
+	editor_command_add(read_index, write_index, EC_SWITCH_WINDOW, &data, sizeof(data));
+}
 
 void editor_command_add_normalize_cursor(int* read_index, int* write_index) {
 	editor_command_add(read_index, write_index, EC_NORMALIZE_CURSOR, NULL, 0);
-	normal_mode_command_clear();
 }
 
 void editor_command_add_scroll(int* read_index, int* write_index, EditorScrollDirection direction, int count) {
 	EditorCommandScrollData data = {.direction = direction, .scroll = count};
 
 	editor_command_add(read_index, write_index, EC_SCROLL, &data, sizeof(data));
-	normal_mode_command_clear();
 }
 
 void editor_command_add_insert_symbol(int* read_index, int* write_index, char symbol, int count) {
 	EditorCommandInsertSymbolData data = {.symbol = symbol, .count = count};
 
 	editor_command_add(read_index, write_index, EC_INSERT, &data, sizeof(data));
-	normal_mode_command_clear();
 }
 
 void process_user_commands(
@@ -1728,6 +1849,26 @@ void process_user_commands(
 				UserCommandDataSymbol* data = (UserCommandDataSymbol*)cmd.data;
 
 				editor_command_add_insert_symbol(editor_read_index, editor_write_index, data->symbol, cmd.count);
+				break;
+			}
+
+			case UC_CTRL_w_l: {
+				editor_command_add_switch_window(editor_read_index, editor_write_index, ED_SWITCH_WINDOW_RIGHT, cmd.count);
+				break;
+			}
+
+			case UC_CTRL_w_h: {
+				editor_command_add_switch_window(editor_read_index, editor_write_index, ED_SWITCH_WINDOW_LEFT, cmd.count);
+				break;
+			}
+
+			case UC_CTRL_w_j: {
+				editor_command_add_switch_window(editor_read_index, editor_write_index, ED_SWITCH_WINDOW_DOWN, cmd.count);
+				break;
+			}
+
+			case UC_CTRL_w_k: {
+				editor_command_add_switch_window(editor_read_index, editor_write_index, ED_SWITCH_WINDOW_UP, cmd.count);
 				break;
 			}
 		}
@@ -1883,6 +2024,49 @@ void process_editor_commands(
 				break;
 			}
 
+			case EC_SWITCH_WINDOW: {
+				EditorCommandSwitchWindowData data;
+				memcpy(&data, &editor_commands[*editor_read_index].data, sizeof(EditorCommandSwitchWindowData));
+
+				int move_count = MAX(1, data.count);
+
+				switch (data.direction) {
+					case ED_SWITCH_WINDOW_RIGHT: {
+						if (current_editor_tab->tab_item_current->right != NULL) {
+							current_editor_tab->tab_item_current = current_editor_tab->tab_item_current->right;
+						}
+
+						break;
+					}
+
+					case ED_SWITCH_WINDOW_LEFT: {
+						if (current_editor_tab->tab_item_current->left != NULL) {
+							current_editor_tab->tab_item_current = current_editor_tab->tab_item_current->left;
+						}
+
+						break;
+					}
+
+					case ED_SWITCH_WINDOW_UP: {
+						if (current_editor_tab->tab_item_current->up != NULL) {
+							current_editor_tab->tab_item_current = current_editor_tab->tab_item_current->up;
+						}
+
+						break;
+					}
+
+					case ED_SWITCH_WINDOW_DOWN: {
+						if (current_editor_tab->tab_item_current->down != NULL) {
+							current_editor_tab->tab_item_current = current_editor_tab->tab_item_current->down;
+						}
+
+						break;
+					}
+
+					break;
+				}
+			}
+
 			case EC_NORMALIZE_CURSOR: {
 				if (line_item_is_newline(*cursor_line_item))
 					nav_backward(cursor_line_item, cursor_pos);
@@ -1960,7 +2144,7 @@ void process_editor_commands(
 
 					*cursor_line_item = (*cursor_line)->item_head;
 				} else if (symbol_is_printable(data.symbol)) {
-					int shift = insert_insert_symbol(cursor_line, cursor_line_item, data.symbol);
+					int shift = insert_insert_symbol(editor_window->cursor_line, editor_window->cursor_line_item, data.symbol);
 					cursor_forward(cursor_pos, shift);
 				}
 			}
@@ -1970,40 +2154,40 @@ void process_editor_commands(
 	}
 }
 
-EditorTabT* init_editor_tab(
-		int argc, char* argv[], 
-		int cols,
-		int rows,
-		ViewT* parent_view
+EditorTabItemT* init_editor_tab_item(
+	char* filename,
+	ViewT* parent_view
 ) {
-	LineT* head_line;
-	char *filename = "empty buffer";
+	int parent_view_cols = view_cols(parent_view);
+	int parent_view_rows = view_rows(parent_view);
 
-	if (argc > 1) {
-		head_line = read_and_parse_source_file(argv[1]);
+	ViewT* source_view = view_new(STATUS_COLUMN_WIDTH, 0, parent_view_cols, parent_view_rows - INFO_LINE_HEIGHT, parent_view);
+	ViewT* status_column_view = view_new(0, 0, STATUS_COLUMN_WIDTH, parent_view_rows - INFO_LINE_HEIGHT, parent_view);
+	ViewT* info_line_view = view_new(0, parent_view_rows - INFO_LINE_HEIGHT, parent_view_cols, parent_view_rows, parent_view);
 
-		filename = argv[1];
-	} else {
-		head_line = line_new();
-		LineItemT* head_line_item = line_item_new();
+	EditorBufferT* editor_buffer = editor_buffer_find_by_filename(filename);
 
-		head_line->item_head = head_line_item;
-		head_line_item->symbol = '\n';
+	if (editor_buffer == NULL) {
+		editor_buffer = editor_buffer_new();
+
+		if (strcmp("", filename)) {
+			editor_buffer->head_line = read_and_parse_source_file(filename);
+			editor_buffer->filename = filename;
+		} else {
+			LineItemT* head_line_item = line_item_new();
+			head_line_item->symbol = '\n';
+
+			editor_buffer->head_line = line_new();
+			editor_buffer->head_line->item_head = head_line_item;
+			editor_buffer->filename = "";
+		}
 	}
-
-	ViewT* buffer_view = view_new(STATUS_COLUMN_WIDTH, 0, cols, rows - INFO_LINE_HEIGHT, parent_view);
-	ViewT* status_column_view = view_new(0, 0, STATUS_COLUMN_WIDTH, rows - INFO_LINE_HEIGHT, parent_view);
-	ViewT* info_line_view = view_new(0, rows - INFO_LINE_HEIGHT, cols, rows, parent_view);
-
-	EditorBuffer* editor_buffer = editor_buffer_new();
-	editor_buffer->head_line = head_line;
-	editor_buffer->filename = filename;
 
 	EditorWindow* editor_window = editor_window_new();
 	editor_window->editor_buffer = editor_buffer;
-	editor_window->cursor_line = head_line;
-	editor_window->cursor_line_item = head_line->item_head;
-	editor_window->source_view = buffer_view;
+	editor_window->cursor_line = editor_buffer->head_line;
+	editor_window->cursor_line_item = editor_buffer->head_line->item_head;
+	editor_window->source_view = source_view;
 	editor_window->status_column_view = status_column_view;
 	editor_window->info_line_view = info_line_view;
 	editor_window->cursor_pos.x = 0;
@@ -2012,8 +2196,19 @@ EditorTabT* init_editor_tab(
 	editor_window->y_offset = 0;
 
 	EditorTabItemT* editor_tab_item = editor_tab_item_new();
-	editor_tab_item->tabno = 1;
+	editor_tab_item->tabno = tabno_counter;
 	editor_tab_item->window = editor_window;
+
+	tabno_counter++;
+
+	return editor_tab_item;
+}
+
+EditorTabT* init_editor_tab(
+	char* filename,
+	ViewT* parent_view
+) {
+	EditorTabItemT* editor_tab_item = init_editor_tab_item(filename, parent_view);
 
 	EditorTabT* editor_tab = editor_tab_new();
 	editor_tab->tab_item_head = editor_tab_item;
@@ -2050,11 +2245,18 @@ int main(int argc, char * argv[]) {
 	int editor_command_write_index = 0;
 
 	char user_input_buf[256];
+	char* filename = "";
+
+	if (argc > 1)
+		filename = argv[1];
 
 	ViewT* main_view = view_new(0, 0, cols, rows, NULL);
-	current_editor_tab = init_editor_tab(argc, argv, cols, rows, main_view);
+	ViewT* source_view = view_new(0, 0, cols, rows - COMMAND_LINE_HEIGHT, main_view);
+	ViewT* current_editor_tab_view = view_new_embedded(source_view);
 
-	ViewT* message_line_view = view_new(0, rows - 1, cols, rows, main_view);
+	current_editor_tab = init_editor_tab(filename, current_editor_tab_view);
+
+	ViewT* command_line_view = view_new(0, rows - COMMAND_LINE_HEIGHT, cols, rows, main_view);
 	ViewT* debug_info_view = view_new((cols / 3) * 2, 0, cols - 1, (rows / 3) * 2, main_view);
 
 	DebugInformation debug_info = {
@@ -2065,7 +2267,7 @@ int main(int argc, char * argv[]) {
 	editor_config_set_scroll(rows / 2);
 
 	draw_editor_tab(current_editor_tab);
-	draw_message_line(message_line_view);
+	draw_command_line(command_line_view);
 	draw_debug_information(debug_info_view, debug_info);
 
 	render(rows, cols);
@@ -2090,7 +2292,7 @@ int main(int argc, char * argv[]) {
 		);
 
 		draw_editor_tab(current_editor_tab);
-		draw_message_line(message_line_view);
+		draw_command_line(command_line_view);
 		draw_debug_information(debug_info_view, debug_info);
 
 		render(rows, cols);
