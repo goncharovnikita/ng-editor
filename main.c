@@ -13,9 +13,10 @@
 #include "line.c"
 #include "view.h"
 #include "calc.h"
+#include "slice.c"
 
 #define MAX_GRID_SIZE 1024
-#define MAX_COMMANDS_BUFFER_SIZE 2
+#define MAX_COMMANDS_BUFFER_SIZE 3
 #define MAX_COMMAND_SIZE 4096
 #define MAX_MESSAGE_SIZE 1024
 #define STATUS_COLUMN_WIDTH 5
@@ -41,8 +42,11 @@ typedef enum {
 typedef enum {
 	EC_MOVE_CURSOR,
 	EC_NORMALIZE_CURSOR,
+	EC_SYNC_BUFFERS,
 	EC_SCROLL,
 	EC_INSERT,
+	EC_INSERT_EXIT,
+	EC_UNDO,
 	EC_SWITCH_WINDOW,
 } EditorCommandType;
 
@@ -64,6 +68,7 @@ typedef enum {
 	UC_CTRL_d,
 	UC_CTRL_u,
 	UC_esc,
+	UC_u,
 	UC_colon,
 	UC_i,
 	UC_I,
@@ -174,11 +179,19 @@ typedef struct {
 typedef struct EditorBuffer {
 	LineT* head_line;
 	char* filename;
+	int bufno;
 	struct EditorBuffer* next;
 } EditorBufferT;
 
+typedef struct BufferUndoList {
+	Slice* undo_list;
+	int bufno;
+	struct BufferUndoList* next;
+} BufferUndoListT;
+
 typedef struct {
-	EditorBufferT* editor_buffer;
+	EditorBufferT* source_buffer;
+	EditorBufferT* working_buffer;
 	LineItemT* cursor_line_item;
 	LineT* cursor_line;
 	ViewT* source_view;
@@ -235,6 +248,7 @@ const char* conf_normal_mode_valid_commands[] = {
 	"\x17\x68", // CTRL-w-h
 	"\x17\x6a", // CTRL-w-j
 	"\x17\x6b", // CTRL-w-k
+	"u",
 
 	"-1",
 };
@@ -249,8 +263,10 @@ Grid rendered_grid = {};
 Grid current_grid = {};
 
 EditorBufferT* buffers;
+BufferUndoListT* buffer_undo_lists;
 EditorTabT* current_editor_tab;
 int64_t tabno_counter = 0;
+int64_t bufno_counter = 0;
 
 ModeType mode_type;
 
@@ -338,19 +354,39 @@ char* string_to_printable(char* str) {
 
 EditorBufferT* editor_buffer_new() {
 	EditorBufferT* buffer = (EditorBufferT*)malloc(sizeof(EditorBufferT));
+	BufferUndoListT* undo_list = (BufferUndoListT*)malloc(sizeof(BufferUndoListT));
+
+	buffer->bufno = bufno_counter;
+	undo_list->bufno = buffer->bufno;
+	undo_list->undo_list = slice_new(64);
+	bufno_counter++;
 
 	if (buffers == NULL) {
 		buffers = buffer;
+		buffer_undo_lists = undo_list;
 	} else {
 		EditorBufferT* buffers_tail = buffers;
+		BufferUndoListT* undo_list_tail = buffer_undo_lists;
 
 		while (buffers_tail->next != NULL)
 			buffers_tail = buffers_tail->next;
 
+		while (undo_list_tail->next != NULL)
+			undo_list_tail = undo_list_tail->next;
+
 		buffers_tail->next = buffer;
+		undo_list_tail->next = undo_list;
 	}
 
 	return buffer;
+}
+
+EditorBufferT* editor_buffer_copy(EditorBufferT* from) {
+	EditorBufferT* copy = editor_buffer_new();
+	copy->filename = from->filename;
+	copy->head_line = line_copy_lines_from(from->head_line);
+
+	return copy;
 }
 
 EditorBufferT* editor_buffer_find_by_filename(char* filename) {
@@ -529,7 +565,7 @@ void draw_editor_window_source(EditorWindow* window) {
 
 	int source_file_skip_lines = y_offset;
 
-	LineT* source_file_line = window->editor_buffer->head_line;
+	LineT* source_file_line = window->working_buffer->head_line;
 
 	while (source_file_skip_lines > 0) {
 		assert(source_file_line != NULL);
@@ -592,7 +628,7 @@ void draw_editor_window_source(EditorWindow* window) {
 void draw_editor_window_status_column(EditorWindow* window) {
 	ViewT* view = window->status_column_view;
 	int y_offset = window->y_offset;
-	int total_rows = line_count_from(window->editor_buffer->head_line);
+	int total_rows = line_count_from(window->working_buffer->head_line);
 	int view_rows_count = view_rows(view);
 	int view_cols_count = view_cols(view);
 
@@ -616,7 +652,7 @@ void draw_editor_window_status_column(EditorWindow* window) {
 
 void draw_editor_window_info_line(EditorWindow* window) {
 	ViewT* view = window->info_line_view;
-	char* filename = window->editor_buffer->filename;
+	char* filename = window->working_buffer->filename;
 	int line = window->cursor_pos.y + window->y_offset;
 	int column = window->cursor_pos.x + window->x_offset;
 	int view_cols_count = view_cols(view);
@@ -746,7 +782,7 @@ void draw_debug_information(ViewT* view, DebugInformation debug_info) {
 	Pos cursor_pos = editor_window->cursor_pos;
 	LineT* cursor_line = editor_window->cursor_line;
 	LineItemT* cursor_head = editor_window->cursor_line_item;
-	int total_rows = line_count_from(editor_window->editor_buffer->head_line);
+	int total_rows = line_count_from(editor_window->working_buffer->head_line);
 
 	for (int y = view->origin.y; y < view->end.y; y++) {
 		int lineno = y - view->origin.y;
@@ -1481,6 +1517,14 @@ void editor_command_add_normalize_cursor(int* read_index, int* write_index) {
 	editor_command_add(read_index, write_index, EC_NORMALIZE_CURSOR, NULL, 0);
 }
 
+void editor_command_add_sync_buffers(int* read_index, int* write_index) {
+	editor_command_add(read_index, write_index, EC_SYNC_BUFFERS, NULL, 0);
+}
+
+void editor_command_add_insert_exit(int* read_index, int* write_index) {
+	editor_command_add(read_index, write_index, EC_INSERT_EXIT, NULL, 0);
+}
+
 void editor_command_add_scroll(int* read_index, int* write_index, EditorScrollDirection direction, int count) {
 	EditorCommandScrollData data = {.direction = direction, .scroll = count};
 
@@ -1589,6 +1633,10 @@ void process_user_commands(
 				insert_mode_command_clear();
 				command_mode_command_clear();
 				editor_command_add_normalize_cursor(editor_read_index, editor_write_index);
+				editor_command_add_sync_buffers(editor_read_index, editor_write_index);
+				if (mode_type == MODE_INSERT)
+					editor_command_add_insert_exit(editor_read_index, editor_write_index);
+
 				mode_set_type(MODE_NORMAL);
 				break;
 			}
@@ -1648,6 +1696,11 @@ void process_user_commands(
 				editor_command_add_switch_window(editor_read_index, editor_write_index, ED_SWITCH_WINDOW_UP, cmd.count);
 				break;
 			}
+
+			case UC_u: {
+				editor_command_add(editor_read_index, editor_write_index, EC_UNDO, NULL, 0);
+				break;
+			}
 		}
 
 		*user_read_index = *user_read_index + 1;
@@ -1664,7 +1717,7 @@ void process_editor_commands(
 	Pos* cursor_pos = &editor_window->cursor_pos;
 	int cols = view_cols(editor_window->source_view);
 	int rows = view_rows(editor_window->source_view);
-	int total_rows = line_count_from(editor_window->editor_buffer->head_line);
+	int total_rows = line_count_from(editor_window->working_buffer->head_line);
 
 	while (*editor_read_index != *editor_write_index) {
 		switch (editor_commands[*editor_read_index].type) {
@@ -1842,9 +1895,18 @@ void process_editor_commands(
 
 					break;
 				}
+
+				break;
 			}
 
 			case EC_NORMALIZE_CURSOR: {
+				if (line_item_is_newline(*cursor_line_item))
+					nav_backward(cursor_line_item, cursor_pos);
+
+				break;
+			}
+
+			case EC_SYNC_BUFFERS: {
 				if (line_item_is_newline(*cursor_line_item))
 					nav_backward(cursor_line_item, cursor_pos);
 
@@ -1877,6 +1939,8 @@ void process_editor_commands(
 						break;
 					}
 				}
+
+				break;
 			}
 
 			case EC_INSERT: {
@@ -1924,6 +1988,37 @@ void process_editor_commands(
 					int shift = insert_insert_symbol(editor_window->cursor_line, editor_window->cursor_line_item, data.symbol);
 					cursor_forward(cursor_pos, shift);
 				}
+
+				break;
+			}
+
+			case EC_INSERT_EXIT: {
+				BufferUndoListT* undo_list = buffer_undo_lists;
+				while (undo_list != NULL && undo_list->bufno != editor_window->source_buffer->bufno)
+					undo_list = undo_list->next;
+
+				assert(undo_list != NULL);
+
+				undo_list->undo_list = slice_append(undo_list->undo_list, editor_window->working_buffer);
+				*editor_window->source_buffer = *editor_window->working_buffer;
+
+				break;
+			}
+
+			case EC_UNDO: {
+				BufferUndoListT* undo_list = buffer_undo_lists;
+				while (undo_list != NULL && undo_list->bufno != editor_window->source_buffer->bufno)
+					undo_list = undo_list->next;
+
+				assert(undo_list != NULL);
+
+				if (undo_list->undo_list->size == 0)
+					return;
+
+				undo_list->undo_list = slice_append(undo_list->undo_list, editor_window->working_buffer);
+				*editor_window->source_buffer = *editor_window->working_buffer;
+
+				break;
 			}
 		}
 
@@ -1959,9 +2054,10 @@ EditorTabItemT* init_editor_tab_item(
 	}
 
 	EditorWindow* editor_window = editor_window_new();
-	editor_window->editor_buffer = editor_buffer;
-	editor_window->cursor_line = editor_buffer->head_line;
-	editor_window->cursor_line_item = editor_buffer->head_line->item_head;
+	editor_window->source_buffer = editor_buffer;
+	editor_window->working_buffer = editor_buffer_copy(editor_buffer);
+	editor_window->cursor_line = editor_window->working_buffer->head_line;
+	editor_window->cursor_line_item = editor_window->working_buffer->head_line->item_head;
 	editor_window->source_view = source_view;
 	editor_window->status_column_view = status_column_view;
 	editor_window->info_line_view = info_line_view;
