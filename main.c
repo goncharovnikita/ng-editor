@@ -15,7 +15,7 @@
 #include "calc.h"
 
 #define MAX_GRID_SIZE 1024
-#define MAX_COMMANDS_BUFFER_SIZE 2
+#define MAX_COMMANDS_BUFFER_SIZE 5
 #define MAX_COMMAND_SIZE 4096
 #define MAX_MESSAGE_SIZE 1024
 #define STATUS_COLUMN_WIDTH 5
@@ -44,6 +44,8 @@ typedef enum {
 	EC_SCROLL,
 	EC_INSERT,
 	EC_SWITCH_WINDOW,
+	EC_SAVE_FILE,
+	EC_QUIT,
 } EditorCommandType;
 
 typedef enum {
@@ -74,6 +76,8 @@ typedef enum {
 	UC_CTRL_w_h,
 	UC_CTRL_w_j,
 	UC_CTRL_w_k,
+	UC_QUIT,
+	UC_SAVE_FILE,
 } UserCommandType;
 
 typedef struct {
@@ -241,6 +245,7 @@ const char* conf_normal_mode_valid_commands[] = {
 
 const char* conf_command_mode_valid_commands[] = {
 	"q", "quit",
+	"w", "wq",
 
 	"-1",
 };
@@ -517,6 +522,26 @@ LineT* read_and_parse_source_file(char *file_name) {
 	fclose(source_file);
 
 	return head_line;
+}
+
+void write_buffer_into_file(EditorBufferT* buffer) {
+	assert(strcmp("", buffer->filename));
+
+	FILE *source_file = fopen(buffer->filename, "w");
+
+	LineT* current_line = buffer->head_line;
+
+	while (current_line != NULL) {
+		char* line_str = line_to_str(current_line);
+
+		fprintf(source_file, "%s", line_str);
+
+		free(line_str);
+
+		current_line = current_line->next;
+	}
+
+	fclose(source_file);
 }
 
 void draw_editor_window_source(EditorWindow* window) {
@@ -1365,9 +1390,20 @@ bool handle_normal_mode_command(int* read_index, int* write_index) {
 	return false;
 }
 
-void handle_command_mode_command() {
+bool handle_command_mode_command(int* read_index, int* write_index) {
 	if (!strcmp("q", command_mode_command.command) || !strcmp("quit", command_mode_command.command))
-		return s_exit_editor();
+		return add_user_command_with_no_data(read_index, write_index, UC_QUIT, normal_mode_command.count);
+
+	if (!strcmp("w", command_mode_command.command))
+		return add_user_command_with_no_data(read_index, write_index, UC_SAVE_FILE, normal_mode_command.count);
+
+
+	if (!strcmp("wq", command_mode_command.command)) {
+		add_user_command_with_no_data(read_index, write_index, UC_SAVE_FILE, normal_mode_command.count);
+		return add_user_command_with_no_data(read_index, write_index, UC_QUIT, normal_mode_command.count);
+	}
+
+	return false;
 }
 
 void handle_insert_mode_command(int* read_index, int* write_index) {
@@ -1422,7 +1458,7 @@ bool handle_user_input(char *input_buf, int *buffer_read_index, int *buffer_writ
 		} else if (mode_type == MODE_COMMAND) {
 			if (symbol_is_enter(input_buf[i])) {
 				if (command_mode_command_is_valid()) {
-					handle_command_mode_command();
+					handle_command_mode_command(buffer_read_index, buffer_write_index);
 				} else {
 					char error_text[MAX_COMMAND_SIZE] = {0};
 					sprintf(error_text, "Not and editor command: %s", command_mode_command.command);
@@ -1646,6 +1682,16 @@ void process_user_commands(
 
 			case UC_CTRL_w_k: {
 				editor_command_add_switch_window(editor_read_index, editor_write_index, ED_SWITCH_WINDOW_UP, cmd.count);
+				break;
+			}
+
+			case UC_SAVE_FILE: {
+				editor_command_add(editor_read_index, editor_write_index, EC_SAVE_FILE, NULL, 0);
+				break;
+			}
+
+			case UC_QUIT: {
+				editor_command_add(editor_read_index, editor_write_index, EC_QUIT, NULL, 0);
 				break;
 			}
 		}
@@ -1877,6 +1923,8 @@ void process_editor_commands(
 						break;
 					}
 				}
+
+				break;
 			}
 
 			case EC_INSERT: {
@@ -1924,8 +1972,22 @@ void process_editor_commands(
 					int shift = insert_insert_symbol(editor_window->cursor_line, editor_window->cursor_line_item, data.symbol);
 					cursor_forward(cursor_pos, shift);
 				}
+
+				break;
+			}
+
+			case EC_SAVE_FILE: {
+				write_buffer_into_file(editor_window->editor_buffer);
+				break;
+			}
+
+			case EC_QUIT: {
+				s_exit_editor();
+				break;
 			}
 		}
+
+
 
 		*editor_read_index = *editor_read_index + 1;
 	}
