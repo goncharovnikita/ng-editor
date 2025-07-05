@@ -2,7 +2,6 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
-#include <termios.h>
 #include <signal.h>
 #include <string.h>
 #include <stdbool.h>
@@ -13,16 +12,14 @@
 #include "line.c"
 #include "view.h"
 #include "calc.h"
+#include "terminal.c"
 
-#define MAX_GRID_SIZE 1024
 #define MAX_COMMANDS_BUFFER_SIZE 5
 #define MAX_COMMAND_SIZE 4096
 #define MAX_MESSAGE_SIZE 1024
 #define STATUS_COLUMN_WIDTH 5
 #define INFO_LINE_HEIGHT 1
 #define COMMAND_LINE_HEIGHT 1
-
-static struct termios old_termios, new_termios;
 
 typedef enum {
 	MODE_NORMAL,
@@ -80,12 +77,6 @@ typedef enum {
 	UC_SAVE_FILE,
 } UserCommandType;
 
-typedef struct {
-	char symbol;
-	Color color;
-} Cell;
-
-typedef Cell Grid[MAX_GRID_SIZE][MAX_GRID_SIZE];
 
 typedef struct {
 	int scroll;
@@ -250,8 +241,10 @@ const char* conf_command_mode_valid_commands[] = {
 	"-1",
 };
 
-Grid rendered_grid = {};
-Grid current_grid = {};
+terminal_color terminal_color_cursor = "\033[90;107m";
+terminal_color terminal_color_clear = "\033[0m";
+terminal_color terminal_color_highlight = "\033[48;5;240m";
+terminal_color terminal_color_info_line = "\033[30;47m";
 
 EditorBufferT* buffers;
 EditorTabT* current_editor_tab;
@@ -396,61 +389,30 @@ void pos_copy(Pos* to, Pos* from) {
 	to->y = from->y;
 }
 
-void s_configure_terminal() {
-	tcgetattr(STDIN_FILENO, &old_termios);
-	new_termios = old_termios;
-
-	new_termios.c_lflag &= ~(ICANON | ECHO);
-	new_termios.c_cc[VMIN] = 1;
-	new_termios.c_cc[VTIME] = 0;
-
-	tcsetattr(STDIN_FILENO, TCSANOW, &new_termios);
-
-	printf("\e[?25l");
-}
-
-void s_restore_terminal() {
-	printf("\e[?25h");
-	printf("\e[m");
-	fflush(stdout);
-
-	tcsetattr(STDIN_FILENO, TCSANOW, &old_termios);
-}
 
 void s_exit_editor() {
 	exit_loop = true;
 }
 
-void r_move_cursor(int x, int y) {
-	fprintf(stdout, "\e[%d;%dH", y + 1, x + 1);
-}
-
-void r_clear_screen() {
-	fprintf(stdout, "\e[1;1H\e[2J");
-}
-
-void r_set_color(Color color) {
+terminal_color* color_to_terminal_color(Color color) {
 	switch (color) {
 		case CURSOR:
-			fprintf(stdout, "\033[90;107m");
-			break;
+			return &terminal_color_cursor;
 
 		case INFO_LINE:
-			fprintf(stdout, "\033[30;47m");
-			break;
+			return &terminal_color_info_line;
 
 		case HIGHLIGHT:
-			fprintf(stdout, "\033[48;5;240m");
-			break;
+			return &terminal_color_highlight;
 
 		case WHITE:
-			fprintf(stdout, "\033[0m");
-			break;
+			return &terminal_color_clear;
 
 		case CLEAR:
-			fprintf(stdout, "\033[0m");
-			break;
+			return &terminal_color_clear;
 	}
+
+	return &terminal_color_clear;
 }
 
 void r_draw_line(int x, int y, int max_len, char* text, Color color) {
@@ -462,31 +424,12 @@ void r_draw_line(int x, int y, int max_len, char* text, Color color) {
 			symbol = text[i];
 
 		current_grid[y][x + i].symbol = symbol;
-		current_grid[y][x + i].color = color;
+		current_grid[y][x + i].color = color_to_terminal_color(color);
 	}
 }
 
 int b_read_input(void *buf) {
 	return read(STDIN_FILENO, buf, sizeof(buf));
-}
-
-void render(int rows, int cols) {
-	for (int y = 0; y < rows; y++) {
-		for (int x = 0; x < cols; x++) {
-			Cell old_cell = rendered_grid[y][x];
-			Cell new_cell = current_grid[y][x];
-
-			if (old_cell.symbol != new_cell.symbol || old_cell.color != new_cell.color) {
-				r_move_cursor(x, y);
-
-				r_set_color(new_cell.color);
-				printf("%c", new_cell.symbol);
-				r_set_color(CLEAR);
-			}
-		}
-	}
-
-	fflush(stdout);
 }
 
 void switch_grids() {
@@ -577,7 +520,7 @@ void draw_editor_window_source(EditorWindow* window) {
 				line_ended = true;
 
 			if (line_ended) {
-				Cell cell = {.symbol = ' ', .color = CLEAR};
+				Cell cell = {.symbol = ' ', .color = &terminal_color_clear};
 
 				memcpy(&current_grid[view_y(view, y)][view_x(view, x)], &cell, sizeof(Cell));
 
@@ -586,7 +529,7 @@ void draw_editor_window_source(EditorWindow* window) {
 
 			if (source_file_line_item->symbol == '\t') {
 				for (int j = 0; j < 4 && x + j < view_cols_count; j++) {
-					Cell cell = {.symbol = ' ', .color = CLEAR};
+					Cell cell = {.symbol = ' ', .color = &terminal_color_clear};
 
 					if (j == 0)
 						cell.symbol = '>';
@@ -598,7 +541,7 @@ void draw_editor_window_source(EditorWindow* window) {
 
 				source_file_line_item = source_file_line_item->next;
 			} else {
-				Cell cell = {.symbol = source_file_line_item->symbol, .color = CLEAR};
+				Cell cell = {.symbol = source_file_line_item->symbol, .color = &terminal_color_clear};
 
 				if (line_item_is_newline(source_file_line_item))
 					cell.symbol = '<';
@@ -650,7 +593,7 @@ void draw_editor_window_info_line(EditorWindow* window) {
 	for (int y = 0; y < view_rows_count; y++) {
 		for (int x = 0; x < view_cols_count; x++) {
 			current_grid[view_y(view, y)][view_x(view, x)].symbol = ' ';
-			current_grid[view_y(view, y)][view_x(view, x)].color = INFO_LINE;
+			current_grid[view_y(view, y)][view_x(view, x)].color = &terminal_color_info_line;
 		}
 	}
 
@@ -674,7 +617,7 @@ void draw_cursor(EditorWindow* editor_window) {
 	int x = editor_window->cursor_pos.x;
 	int y = editor_window->cursor_pos.y;
 
-	current_grid[view_y(view, y)][view_x(view, x)].color = CURSOR;
+	current_grid[view_y(view, y)][view_x(view, x)].color = &terminal_color_cursor;
 }
 
 void highlight_line(EditorWindow* editor_window) {
@@ -683,7 +626,7 @@ void highlight_line(EditorWindow* editor_window) {
 	int view_cols_count = view_cols(view);
 
 	for (int x = 0; x < view_cols_count; x++) {
-		current_grid[view_y(view, y)][view_x(view, x)].color = HIGHLIGHT;
+		current_grid[view_y(view, y)][view_x(view, x)].color = &terminal_color_highlight;
 	}
 }
 
@@ -718,7 +661,7 @@ void draw_command_line(ViewT* view) {
 
 	for (int x = view->origin.x; x < view->end.x; x++) {
 		current_grid[y][x].symbol = ' ';
-		current_grid[y][x].color = CLEAR;
+		current_grid[y][x].color = &terminal_color_clear;
 	}
 
 	if (mode_type == MODE_NORMAL) {
@@ -2057,11 +2000,11 @@ EditorTabT* init_editor_tab(
 int main(int argc, char * argv[]) {
 	srand(time(NULL));
 
-	s_configure_terminal();
-	atexit(s_restore_terminal);
+	t_configure_terminal();
+	atexit(t_restore_terminal);
 	signal(SIGINT, s_exit_editor);
 
-	r_clear_screen();
+	t_clear_screen();
 
 	struct winsize w_winsize;
 	ioctl(STDOUT_FILENO, TIOCGWINSZ, &w_winsize);
@@ -2107,7 +2050,7 @@ int main(int argc, char * argv[]) {
 	draw_command_line(command_line_view);
 	draw_debug_information(debug_info_view, debug_info);
 
-	render(rows, cols);
+	t_render(rows, cols);
 	switch_grids();
 
 	while (!exit_loop) {
@@ -2132,9 +2075,9 @@ int main(int argc, char * argv[]) {
 		draw_command_line(command_line_view);
 		draw_debug_information(debug_info_view, debug_info);
 
-		render(rows, cols);
+		t_render(rows, cols);
 		switch_grids();
 	}
 
-	r_move_cursor(0, rows);
+	t_move_cursor(0, rows);
 }
